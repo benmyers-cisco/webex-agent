@@ -1,5 +1,8 @@
 import httpx
+import os
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 
@@ -221,3 +224,109 @@ class WebexClient:
         messages = self.get_messages(room_id, max_results=max_results)
         query_lower = query.lower()
         return [m for m in messages if query_lower in m.get("text", "").lower()]
+
+    # --- Recordings ---
+
+    def list_recordings(
+        self,
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
+        max_results: int = 20,
+    ) -> list[dict]:
+        """List recordings owned by the authenticated user.
+
+        Args:
+            from_date: Start of date range (default: 30 days ago)
+            to_date: End of date range (default: now)
+            max_results: Maximum recordings to return
+        """
+        if from_date is None:
+            from_date = datetime.now(timezone.utc) - timedelta(days=30)
+        if to_date is None:
+            to_date = datetime.now(timezone.utc)
+
+        params = {
+            "from": from_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "to": to_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "max": min(max_results, 100),
+        }
+        response = self.client.get("/recordings", params=params)
+        response.raise_for_status()
+        return response.json().get("items", [])
+
+    def get_recording_details(self, recording_id: str) -> dict:
+        """Get full details for a recording, including temporary download links."""
+        response = self.client.get(f"/recordings/{recording_id}")
+        response.raise_for_status()
+        return response.json()
+
+    def download_recording(
+        self,
+        recording_id: str,
+        output_dir: str,
+        download_video: bool = True,
+        download_transcript: bool = True,
+    ) -> dict:
+        """Download a recording's video and/or transcript.
+
+        Args:
+            recording_id: Webex recording ID
+            output_dir: Directory to save files to
+            download_video: Whether to download the video file
+            download_transcript: Whether to download the transcript
+
+        Returns:
+            Dict with 'video_path', 'transcript_path', and 'details' keys
+        """
+        details = self.get_recording_details(recording_id)
+        links = details.get("temporaryDirectDownloadLinks", {})
+        result = {"details": details, "video_path": None, "transcript_path": None}
+
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        # Build a safe filename from the topic
+        topic = details.get("topic", "recording")
+        date_str = details.get("timeRecorded", details.get("createTime", ""))[:10]
+        safe_topic = _slugify(topic)
+        base_name = f"{safe_topic}-{date_str}" if date_str else safe_topic
+
+        if download_video:
+            video_url = links.get("recordingDownloadLink")
+            if video_url:
+                video_ext = _ext_from_format(details.get("format", "mp4"))
+                video_path = out / f"{base_name}.{video_ext}"
+                _download_file(video_url, video_path, self.client)
+                result["video_path"] = str(video_path)
+
+        if download_transcript:
+            transcript_url = links.get("transcriptDownloadLink")
+            if transcript_url:
+                transcript_path = out / f"{base_name}.vtt"
+                _download_file(transcript_url, transcript_path, self.client)
+                result["transcript_path"] = str(transcript_path)
+
+        return result
+
+
+def _slugify(text: str, max_len: int = 60) -> str:
+    """Turn a string into a filesystem-safe slug."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text[:max_len]
+
+
+def _ext_from_format(fmt: str) -> str:
+    """Map Webex recording format to file extension."""
+    return {"MP4": "mp4", "ARF": "arf", "WRF": "wrf"}.get(fmt.upper(), "mp4")
+
+
+def _download_file(url: str, dest: Path, client: httpx.Client):
+    """Stream-download a file from a URL."""
+    with client.stream("GET", url, follow_redirects=True) as r:
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in r.iter_bytes(chunk_size=8192):
+                f.write(chunk)

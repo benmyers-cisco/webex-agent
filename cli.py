@@ -2,6 +2,7 @@
 """Webex Agent - Summarize and search your Webex spaces."""
 
 import os
+import sys
 import click
 import anthropic
 from datetime import datetime, timezone, timedelta
@@ -11,6 +12,8 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.markdown import Markdown
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "servers"))
+
 from webex_client import WebexClient
 from summarizer import summarize_messages, semantic_search, analyze_topic
 
@@ -18,12 +21,25 @@ load_dotenv()
 console = Console()
 
 
+def get_webex_token() -> str:
+    """Get a valid Webex token via OAuth (preferred) or env var."""
+    client_id = os.environ.get("WEBEX_CLIENT_ID", "")
+    client_secret = os.environ.get("WEBEX_CLIENT_SECRET", "")
+    if client_id and client_secret:
+        from oauth import get_valid_token
+        token = get_valid_token(client_id, client_secret)
+        if token:
+            return token
+    token = os.environ.get("WEBEX_ACCESS_TOKEN", "")
+    if token:
+        return token
+    console.print("[red]No valid Webex token. Run OAuth login or set WEBEX_ACCESS_TOKEN.[/red]")
+    raise SystemExit(1)
+
+
 def get_clients():
-    webex_token = os.environ.get("WEBEX_ACCESS_TOKEN")
+    webex_token = get_webex_token()
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not webex_token:
-        console.print("[red]WEBEX_ACCESS_TOKEN not set. Add it to .env or export it.[/red]")
-        raise SystemExit(1)
     if not anthropic_key:
         console.print("[red]ANTHROPIC_API_KEY not set. Add it to .env or export it.[/red]")
         raise SystemExit(1)
@@ -313,6 +329,101 @@ def search(query, space_filter, after_str, max_messages, keyword_only):
 
     if not results_found:
         console.print(f"\n[yellow]No results found for '{query}'.[/yellow]")
+
+
+@cli.command()
+@click.option("--after", "-a", "after_str", help="Start of date range (e.g., 7d, 30d, 2024-01-15)")
+@click.option("--before", "-b", "before_str", help="End of date range")
+@click.option("--limit", "-l", default=20, help="Max recordings to show")
+def recordings(after_str, before_str, limit):
+    """List your Webex recordings.
+
+    Examples:
+        webex-agent recordings                     # Last 30 days
+        webex-agent recordings --after 7d          # Last 7 days
+        webex-agent recordings --after 2024-03-01  # Since March 1
+    """
+    webex = WebexClient(get_webex_token())
+
+    from_dt = parse_timeframe(after_str) if after_str else None
+    to_dt = parse_timeframe(before_str) if before_str else None
+
+    with console.status("Fetching recordings..."):
+        recs = webex.list_recordings(from_date=from_dt, to_date=to_dt, max_results=limit)
+
+    if not recs:
+        console.print("[yellow]No recordings found.[/yellow]")
+        return
+
+    table = Table(title=f"Your Recordings ({len(recs)} found)", show_lines=False)
+    table.add_column("#", style="cyan", width=3)
+    table.add_column("Topic", style="bold", no_wrap=False, max_width=50)
+    table.add_column("Date", width=10)
+    table.add_column("Dur", width=8)
+    table.add_column("ID", style="dim", overflow="fold")
+
+    for i, r in enumerate(recs, 1):
+        date = r.get("timeRecorded", r.get("createTime", ""))[:10]
+        dur_sec = r.get("durationSeconds", 0)
+        dur = f"{dur_sec // 60}m {dur_sec % 60}s" if dur_sec else "?"
+        table.add_row(str(i), r.get("topic", "Untitled"), date, dur, r.get("id", ""))
+
+    console.print(table)
+
+
+@cli.command()
+@click.argument("recording_id")
+@click.option("--output", "-o", "output_dir", default=None, help="Output directory (default: ~/recordings/)")
+@click.option("--video/--no-video", default=True, help="Download video file")
+@click.option("--transcript/--no-transcript", default=True, help="Download transcript")
+def download(recording_id, output_dir, video, transcript):
+    """Download a Webex recording and/or transcript.
+
+    RECORDING_ID: The recording ID (from `webex-agent recordings`) or a
+    1-based index like '#3' to pick from recent recordings.
+
+    Examples:
+        webex-agent download <recording-id>
+        webex-agent download '#1'                              # Download most recent
+        webex-agent download <id> --no-video                   # Transcript only
+        webex-agent download <id> -o ~/Projects/my-project/    # Custom output dir
+    """
+    webex = WebexClient(get_webex_token())
+
+    # Support '#N' shorthand to pick from recent recordings
+    if recording_id.startswith("#"):
+        try:
+            idx = int(recording_id[1:]) - 1
+        except ValueError:
+            console.print(f"[red]Invalid index: {recording_id}[/red]")
+            raise SystemExit(1)
+        with console.status("Fetching recent recordings..."):
+            recs = webex.list_recordings(max_results=20)
+        if idx < 0 or idx >= len(recs):
+            console.print(f"[red]Index out of range. You have {len(recs)} recent recordings.[/red]")
+            raise SystemExit(1)
+        recording_id = recs[idx]["id"]
+        console.print(f"Selected: [bold]{recs[idx].get('topic', 'Untitled')}[/bold]")
+
+    if output_dir is None:
+        output_dir = os.path.expanduser("~/recordings")
+
+    with console.status("Downloading recording..."):
+        result = webex.download_recording(
+            recording_id,
+            output_dir=output_dir,
+            download_video=video,
+            download_transcript=transcript,
+        )
+
+    details = result["details"]
+    console.print(f"\n[bold green]Downloaded:[/bold green] {details.get('topic', 'Untitled')}")
+    if result["video_path"]:
+        console.print(f"  Video:      {result['video_path']}")
+    if result["transcript_path"]:
+        console.print(f"  Transcript: {result['transcript_path']}")
+    if not result["video_path"] and not result["transcript_path"]:
+        console.print("[yellow]  No download links available (you may not own this recording).[/yellow]")
 
 
 if __name__ == "__main__":

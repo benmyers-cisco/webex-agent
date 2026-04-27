@@ -327,6 +327,73 @@ def search_knowledge(query: str = "") -> str:
     return "\n".join(matches)
 
 
+@mcp.tool()
+def list_recordings(
+    after: str = "30d",
+    before: str = "",
+    max_results: int = 20,
+) -> str:
+    """List the user's Webex meeting recordings.
+
+    Only returns recordings the user owns (was the meeting host).
+
+    Args:
+        after: Start of date range (e.g., "7d", "30d", "2024-01-15"). Default: 30 days ago.
+        before: End of date range (e.g., "1d", "2024-03-01"). Default: now.
+        max_results: Maximum recordings to return (default 20)
+    """
+    client = get_client()
+    from_dt = parse_timeframe(after)
+    to_dt = parse_timeframe(before) if before else None
+    recs = client.list_recordings(from_date=from_dt, to_date=to_dt, max_results=max_results)
+    if not recs:
+        return "No recordings found in that date range."
+    lines = []
+    for i, r in enumerate(recs, 1):
+        date = r.get("timeRecorded", r.get("createTime", ""))[:10]
+        dur_sec = r.get("durationSeconds", 0)
+        dur = f"{dur_sec // 60}m {dur_sec % 60}s" if dur_sec else "?"
+        lines.append(f"{i}. {r.get('topic', 'Untitled')} ({date}, {dur}) — ID: {r['id']}")
+    return f"Found {len(recs)} recordings:\n" + "\n".join(lines)
+
+
+@mcp.tool()
+def download_recording(
+    recording_id: str,
+    output_dir: str = "",
+    download_video: bool = True,
+    download_transcript: bool = True,
+) -> str:
+    """Download a Webex recording's video and/or transcript to disk.
+
+    Only works for recordings the user owns (was the meeting host).
+
+    Args:
+        recording_id: The Webex recording ID (from list_recordings)
+        output_dir: Directory to save files to (default: ~/recordings/)
+        download_video: Whether to download the video file (default: true)
+        download_transcript: Whether to download the transcript (default: true)
+    """
+    client = get_client()
+    if not output_dir:
+        output_dir = os.path.expanduser("~/recordings")
+    result = client.download_recording(
+        recording_id,
+        output_dir=output_dir,
+        download_video=download_video,
+        download_transcript=download_transcript,
+    )
+    details = result["details"]
+    parts = [f"Recording: {details.get('topic', 'Untitled')}"]
+    if result["video_path"]:
+        parts.append(f"Video saved: {result['video_path']}")
+    if result["transcript_path"]:
+        parts.append(f"Transcript saved: {result['transcript_path']}")
+    if not result["video_path"] and not result["transcript_path"]:
+        parts.append("No download links available (you may not own this recording).")
+    return "\n".join(parts)
+
+
 def _find_space(client: WebexClient, space_name: str) -> dict:
     """Find a space by partial name match."""
     spaces = client.list_spaces(max_results=200)
