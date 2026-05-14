@@ -31,7 +31,7 @@ NOTES_DIR = os.path.expanduser(
 )
 TOKEN_FILE = os.path.expanduser("~/Projects/webex-agent/.webex_token.json")
 SLACK_ENV_FILE = os.path.expanduser("~/Projects/claude-remote-slack/.env")
-SLACK_USER_ID = "U0ATG4ZAHPE"
+SLACK_USER_ID = os.environ.get("SLACK_USER_ID", "U0ATG4ZAHPE")
 WEBEX_AGENT_DIR = os.path.expanduser("~/Projects/webex-agent")
 
 # Try to import webex-agent dependencies (available when run from its venv)

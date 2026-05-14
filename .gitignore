@@ -1,5 +1,6 @@
 .env
 .webex_token.json
+preferences.md
 .last_run
 knowledge.md
 __pycache__/

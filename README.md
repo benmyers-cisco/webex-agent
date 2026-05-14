@@ -180,7 +180,7 @@ The daily summary uses a `.last_run` file to automatically look back to the prev
 
 ## Trainable preferences
 
-Teach the agent what matters to you by updating `preferences.md`. You can do this conversationally ("I don't care about help desk chatter") or edit the file directly:
+Teach the agent what matters to you by copying `preferences.example.md` to `preferences.md` and editing it. You can also update it conversationally ("I don't care about help desk chatter"):
 
 ```markdown
 ## My Role & Focus
