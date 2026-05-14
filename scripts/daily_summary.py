@@ -100,6 +100,11 @@ Analyze this Webex conversation and categorize into EXACTLY these sections. Only
 ### Blocked on you
 People waiting for your input, approval, or response. These are the highest priority — someone else cannot move forward until you act.
 For each item: who is waiting, what they need, and a **suggested reply** you could send (in a quoted block).
+IMPORTANT: Do NOT include items here where the user sent the last message and is waiting for a reply. Those belong in "Waiting on others."
+
+### Waiting on others
+Threads where you've sent a message or made a request and are waiting for someone else to respond. Brief reminder of what you're waiting for and from whom.
+Do NOT include suggested replies here — you've already acted.
 
 ### Decisions made without you
 Decisions, conclusions, or direction changes that happened in this conversation that affect your work. You weren't part of the decision but need to know about it.
@@ -113,6 +118,11 @@ For each: what's being discussed, why your input matters, and a **suggested mess
 Important context or updates — no action needed, but useful to know.
 
 RULES:
+- **DIRECTIONALITY IS CRITICAL.** Messages marked "**YOU ({user_email})**" were sent BY the user. Use these to determine who the ball is with:
+  - If the user sent the LAST message in a thread/topic, the ball is USUALLY with the other person. The user is likely waiting for their response. Do NOT put this in "Blocked on you."
+  - EXCEPTION: If the user's last message commits them to a future action (e.g., "I'll get back to you", "Let me look into that", "I'll send it over", "Will do"), then the ball IS still with the user — flag it appropriately.
+  - "Blocked on you" means someone ELSE needs something from the user AND the user has not yet delivered it.
+  - Read the content of the user's messages carefully — don't just check who spoke last, understand what was said and what obligations remain.
 - ERR ON THE SIDE OF OVER-INFORMING. When in doubt about whether something is relevant, include it. It's better to flag something the user can quickly skip than to miss something important. Only respond with "No items requiring your attention." if the conversation is truly unrelated to their work.
 - ALWAYS include the space name "{space_name}" at the start of each item so the user knows exactly where to find and reply to the conversation
 - Be specific — include names, timestamps, and quote key phrases
@@ -130,13 +140,16 @@ Transcript:
     return response.content[0].text
 
 
-def format_messages(messages: list[dict]) -> str:
+def format_messages(messages: list[dict], user_email: str = "") -> str:
     lines = []
     for msg in reversed(messages):
         sender = msg.get("personEmail", "Unknown")
         timestamp = msg.get("created", "")[:16].replace("T", " ")
         text = msg.get("text", "[non-text content]")
-        lines.append(f"[{timestamp}] {sender}: {text}")
+        if user_email and sender.lower() == user_email.lower():
+            lines.append(f"[{timestamp}] **YOU ({sender})**: {text}")
+        else:
+            lines.append(f"[{timestamp}] {sender}: {text}")
     return "\n".join(lines)
 
 
@@ -356,6 +369,7 @@ def main():
 
     # Triage each space
     blocked_parts = []
+    waiting_parts = []
     decisions_parts = []
     opportunities_parts = []
     fyi_parts = []
@@ -365,7 +379,7 @@ def main():
         if not messages:
             continue
         print(f"  Analyzing '{space['title']}' ({len(messages)} messages)...")
-        transcript = format_messages(messages)
+        transcript = format_messages(messages, user_email)
         triage = triage_with_claude(claude, transcript, space["title"], user_email)
         if "no items requiring your attention" in triage.lower():
             print(f"    -> Nothing relevant, skipping.")
@@ -379,34 +393,40 @@ def main():
             if "blocked on you" in lower:
                 if current_section and current_lines:
                     _append_section(current_section, current_lines, space["title"],
-                                    blocked_parts, decisions_parts, opportunities_parts, fyi_parts)
+                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
                 current_section = "blocked"
+                current_lines = []
+            elif "waiting on others" in lower:
+                if current_section and current_lines:
+                    _append_section(current_section, current_lines, space["title"],
+                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
+                current_section = "waiting"
                 current_lines = []
             elif "decisions made without you" in lower:
                 if current_section and current_lines:
                     _append_section(current_section, current_lines, space["title"],
-                                    blocked_parts, decisions_parts, opportunities_parts, fyi_parts)
+                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
                 current_section = "decisions"
                 current_lines = []
             elif "opportunities to add value" in lower:
                 if current_section and current_lines:
                     _append_section(current_section, current_lines, space["title"],
-                                    blocked_parts, decisions_parts, opportunities_parts, fyi_parts)
+                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
                 current_section = "opportunities"
                 current_lines = []
             elif lower.startswith("fyi"):
                 if current_section and current_lines:
                     _append_section(current_section, current_lines, space["title"],
-                                    blocked_parts, decisions_parts, opportunities_parts, fyi_parts)
+                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
                 current_section = "fyi"
                 current_lines = []
             else:
                 current_lines.append(line)
         if current_section and current_lines:
             _append_section(current_section, current_lines, space["title"],
-                            blocked_parts, decisions_parts, opportunities_parts, fyi_parts)
+                            blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
 
-    if not any([blocked_parts, decisions_parts, opportunities_parts, fyi_parts]):
+    if not any([blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts]):
         print("No actionable items found.")
         save_run_timestamp()
         return
@@ -417,6 +437,8 @@ def main():
 
     if blocked_parts:
         parts.append("## 🔴 Blocked on You\n" + "\n".join(blocked_parts))
+    if waiting_parts:
+        parts.append("## ⏳ Waiting on Others\n" + "\n".join(waiting_parts))
     if decisions_parts:
         parts.append("## 🟡 Decisions Made Without You\n" + "\n".join(decisions_parts))
     if opportunities_parts:
@@ -447,7 +469,7 @@ def main():
 
 
 def _append_section(section: str, lines: list[str], space_title: str,
-                    blocked: list, decisions: list, opportunities: list, fyi: list):
+                    blocked: list, waiting: list, decisions: list, opportunities: list, fyi: list):
     """Append parsed section content to the appropriate list."""
     content = "\n".join(lines).strip()
     if not content:
@@ -455,6 +477,8 @@ def _append_section(section: str, lines: list[str], space_title: str,
     entry = f"**{space_title}**\n{content}\n"
     if section == "blocked":
         blocked.append(entry)
+    elif section == "waiting":
+        waiting.append(entry)
     elif section == "decisions":
         decisions.append(entry)
     elif section == "opportunities":
