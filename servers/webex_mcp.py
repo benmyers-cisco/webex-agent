@@ -505,33 +505,135 @@ def _load_preferences() -> str:
     return ""
 
 
-def _parse_space_lists(preferences: str) -> tuple[set, set]:
-    """Parse 'Always Scan' and 'Never Scan' space names from preferences."""
+def _parse_preferences(preferences: str) -> dict:
+    """Parse all preference sections into a structured dict.
+
+    Returns:
+        {
+            "always_scan": set of space names (lowercased),
+            "mentions_only": set of space names (lowercased),
+            "never_scan": set of space names (lowercased),
+            "space_rules": dict of space_name_lower -> rule text,
+            "noise_patterns": list of pattern descriptions,
+            "priority_map": dict of space_name_lower -> priority int (1, 2, 3),
+        }
+    """
     always_scan = set()
+    mentions_only = set()
     never_scan = set()
+    space_rules = {}
+    noise_patterns = []
+    priority_map = {}
+
     current_section = None
+    current_priority = 2  # default
+    current_rule_space = None
+    current_rule_lines = []
+
     for line in preferences.split("\n"):
         stripped = line.strip()
         lower = stripped.lower()
+
+        # Top-level section detection
         if lower.startswith("## always scan"):
+            _flush_rule(current_rule_space, current_rule_lines, space_rules)
+            current_rule_space = None
+            current_rule_lines = []
             current_section = "always"
+            current_priority = 2
+            continue
+        elif lower.startswith("## mentions only"):
+            _flush_rule(current_rule_space, current_rule_lines, space_rules)
+            current_rule_space = None
+            current_rule_lines = []
+            current_section = "mentions"
             continue
         elif lower.startswith("## never scan"):
+            _flush_rule(current_rule_space, current_rule_lines, space_rules)
+            current_rule_space = None
+            current_rule_lines = []
             current_section = "never"
             continue
+        elif lower.startswith("## space-specific rules"):
+            _flush_rule(current_rule_space, current_rule_lines, space_rules)
+            current_rule_space = None
+            current_rule_lines = []
+            current_section = "rules"
+            continue
+        elif lower.startswith("## noise patterns"):
+            _flush_rule(current_rule_space, current_rule_lines, space_rules)
+            current_rule_space = None
+            current_rule_lines = []
+            current_section = "noise"
+            continue
         elif stripped.startswith("## "):
+            _flush_rule(current_rule_space, current_rule_lines, space_rules)
+            current_rule_space = None
+            current_rule_lines = []
             current_section = None
             continue
-        if not stripped or stripped.startswith("<!--") or stripped.startswith("###"):
+
+        # Sub-headers for priority tiers within Always Scan
+        if current_section == "always" and stripped.startswith("### "):
+            if "priority 1" in lower:
+                current_priority = 1
+            elif "priority 2" in lower:
+                current_priority = 2
+            elif "priority 3" in lower:
+                current_priority = 3
             continue
-        if stripped.startswith("- ") and current_section:
+
+        # Sub-headers for space-specific rules
+        if current_section == "rules" and stripped.startswith("### "):
+            _flush_rule(current_rule_space, current_rule_lines, space_rules)
+            current_rule_space = stripped[4:].strip().lower()
+            current_rule_lines = []
+            continue
+
+        # Skip comments and blank lines
+        if not stripped or stripped.startswith("<!--"):
+            continue
+
+        # Parse list items
+        if stripped.startswith("- "):
             name = stripped[2:].strip()
-            if name:
-                if current_section == "always":
-                    always_scan.add(name.lower())
-                elif current_section == "never":
-                    never_scan.add(name.lower())
-    return always_scan, never_scan
+            if not name:
+                continue
+
+            if current_section == "always":
+                always_scan.add(name.lower())
+                priority_map[name.lower()] = current_priority
+            elif current_section == "mentions":
+                mentions_only.add(name.lower())
+            elif current_section == "never":
+                never_scan.add(name.lower())
+            elif current_section == "noise":
+                noise_patterns.append(name)
+            elif current_section == "rules" and current_rule_space:
+                current_rule_lines.append(name)
+
+    _flush_rule(current_rule_space, current_rule_lines, space_rules)
+
+    return {
+        "always_scan": always_scan,
+        "mentions_only": mentions_only,
+        "never_scan": never_scan,
+        "space_rules": space_rules,
+        "noise_patterns": noise_patterns,
+        "priority_map": priority_map,
+    }
+
+
+def _flush_rule(space_name: str | None, lines: list, space_rules: dict):
+    """Helper to save accumulated rule lines."""
+    if space_name and lines:
+        space_rules[space_name] = "\n".join(f"- {l}" for l in lines)
+
+
+def _parse_space_lists(preferences: str) -> tuple[set, set]:
+    """Legacy compat: returns (always_scan, never_scan) sets."""
+    parsed = _parse_preferences(preferences)
+    return parsed["always_scan"], parsed["never_scan"]
 
 
 def _is_group_chat(space: dict) -> bool:
@@ -552,12 +654,72 @@ def _format_messages_with_user(messages: list[dict], user_email: str) -> str:
     return "\n".join(lines)
 
 
-def _triage_space_with_claude(transcript: str, space_name: str, user_email: str) -> str:
+def _filter_noise(messages: list[dict], noise_patterns: list[str]) -> list[dict]:
+    """Pre-filter messages that match noise patterns before sending to Claude.
+
+    Removes obvious noise (bot messages, greetings-only, emoji-only) to reduce
+    token usage and improve triage quality.
+    """
+    if not noise_patterns:
+        return messages
+
+    # Extract bot names from noise patterns
+    bot_names = set()
+    for pattern in noise_patterns:
+        lower = pattern.lower()
+        if "bot messages from:" in lower:
+            # Parse "Bot messages from: name1, name2, name3"
+            names_part = pattern.split(":", 1)[1] if ":" in pattern else ""
+            for name in names_part.split(","):
+                name = name.strip().lower()
+                if name:
+                    bot_names.add(name)
+
+    filtered = []
+    for msg in messages:
+        sender = msg.get("personEmail", "").split("@")[0].lower()
+        text = (msg.get("text", "") or "").strip()
+
+        # Skip bot messages
+        if sender in bot_names:
+            continue
+
+        # Skip emoji-only messages (no alphanumeric content)
+        if text and not any(c.isalnum() for c in text):
+            continue
+
+        # Skip pure greetings (very short messages that are just hello/morning)
+        if text and len(text) < 20:
+            greeting_words = {"morning", "good morning", "morning!", "hi", "hello", "hey", "brb", "back"}
+            if text.lower().rstrip("!. ") in greeting_words:
+                continue
+
+        filtered.append(msg)
+
+    return filtered
+
+
+def _triage_space_with_claude(
+    transcript: str,
+    space_name: str,
+    user_email: str,
+    space_rules: str = "",
+    noise_patterns: list[str] | None = None,
+    role_context: str = "",
+) -> str:
     """Triage a single space's transcript using Claude."""
     import anthropic
 
-    preferences = _load_preferences()
-    prefs_block = f"USER PREFERENCES (use these to judge relevance):\n{preferences}" if preferences else ""
+    # Build context blocks
+    prefs_parts = []
+    if role_context:
+        prefs_parts.append(f"USER ROLE & FOCUS:\n{role_context}")
+    if space_rules:
+        prefs_parts.append(f"RULES FOR THIS SPACE ({space_name}):\n{space_rules}")
+    if noise_patterns:
+        prefs_parts.append("NOISE PATTERNS TO IGNORE:\n" + "\n".join(f"- {p}" for p in noise_patterns))
+
+    prefs_block = "\n\n".join(prefs_parts)
 
     use_bedrock = os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "true"
     if use_bedrock:
@@ -647,7 +809,25 @@ def triage(
     lookback_utc = lookback_dt.astimezone(timezone.utc) if lookback_dt.tzinfo else lookback_dt.replace(tzinfo=timezone.utc)
 
     preferences = _load_preferences()
-    always_scan, never_scan = _parse_space_lists(preferences)
+    prefs = _parse_preferences(preferences)
+    always_scan = prefs["always_scan"]
+    mentions_only = prefs["mentions_only"]
+    never_scan = prefs["never_scan"]
+    space_rules = prefs["space_rules"]
+    noise_patterns = prefs["noise_patterns"]
+    priority_map = prefs["priority_map"]
+
+    # Extract role context (first section of preferences)
+    role_context = ""
+    in_role = False
+    for line in preferences.split("\n"):
+        if line.strip().lower().startswith("## my role"):
+            in_role = True
+            continue
+        elif line.strip().startswith("## "):
+            in_role = False
+        elif in_role and line.strip() and not line.strip().startswith("<!--"):
+            role_context += line.strip() + "\n"
 
     # Fetch all spaces and filter by activity window
     all_spaces = client.list_spaces(max_results=200)
@@ -660,8 +840,10 @@ def triage(
                 continue
         active_spaces.append(space)
 
-    # Determine relevant spaces
-    relevant_spaces = []
+    # Categorize spaces: full-scan vs mentions-only
+    full_scan_spaces = []
+    mentions_check_spaces = []
+
     for space in active_spaces:
         title = space.get("title", "")
         title_lower = title.lower()
@@ -670,13 +852,36 @@ def triage(
             continue
 
         space_type = space.get("type", "group")
-        if space_type == "direct" or _is_group_chat(space) or title_lower in always_scan:
-            relevant_spaces.append(space)
-        # For other channels, we'd need to check mentions — skip for now to keep it fast
-        # (the daily_summary.py script does this, but it's slow per-space)
 
-        if len(relevant_spaces) >= max_spaces:
+        if space_type == "direct" or _is_group_chat(space) or title_lower in always_scan:
+            full_scan_spaces.append(space)
+        elif title_lower in mentions_only:
+            mentions_check_spaces.append(space)
+
+        if len(full_scan_spaces) >= max_spaces:
             break
+
+    # Sort full-scan spaces by priority (P1 first)
+    full_scan_spaces.sort(key=lambda s: priority_map.get(s.get("title", "").lower(), 2))
+
+    # For mentions-only spaces, check if user was mentioned
+    for space in mentions_check_spaces:
+        if len(full_scan_spaces) >= max_spaces:
+            break
+        messages = client.get_messages(space["id"], after=lookback_dt, max_results=50)
+        if not messages:
+            continue
+        # Check if any message mentions the user by name or email
+        user_name = user_email.split("@")[0]
+        mentioned = any(
+            user_email.lower() in (m.get("text", "") or "").lower()
+            or user_name.lower() in (m.get("text", "") or "").lower()
+            for m in messages
+        )
+        if mentioned:
+            full_scan_spaces.append(space)
+
+    relevant_spaces = full_scan_spaces
 
     if not relevant_spaces:
         return "No spaces with recent activity found in the lookback window."
@@ -686,21 +891,37 @@ def triage(
     skipped = []
 
     for space in relevant_spaces:
+        title = space.get("title", "")
+        title_lower = title.lower()
         messages = client.get_messages(space["id"], after=lookback_dt, max_results=200)
         if not messages or len(messages) < 2:
             continue
 
-        transcript = _format_messages_with_user(messages, user_email)
+        # Filter out noise pattern messages (bot messages, greetings, etc.)
+        filtered_messages = _filter_noise(messages, noise_patterns)
+        if not filtered_messages or len(filtered_messages) < 2:
+            continue
+
+        transcript = _format_messages_with_user(filtered_messages, user_email)
+
+        # Get space-specific rules if any
+        rules_for_space = space_rules.get(title_lower, "")
+
         try:
-            triage_text = _triage_space_with_claude(transcript, space["title"], user_email)
+            triage_text = _triage_space_with_claude(
+                transcript, title, user_email,
+                space_rules=rules_for_space,
+                noise_patterns=noise_patterns,
+                role_context=role_context,
+            )
         except Exception as e:
-            skipped.append(f"{space['title']}: {e}")
+            skipped.append(f"{title}: {e}")
             continue
 
         if "no items requiring your attention" in triage_text.lower():
             continue
 
-        sections = _parse_triage_sections(triage_text, space["title"])
+        sections = _parse_triage_sections(triage_text, title)
         for key in all_sections:
             all_sections[key].extend(sections[key])
 

@@ -146,6 +146,9 @@ The MCP server (`servers/webex_mcp.py`) exposes these tools to Claude:
 | `search_knowledge` | Query the personal knowledge base |
 | `list_recordings` | List your Webex recordings with date filters |
 | `download_recording` | Download recording video and/or transcript |
+| `triage` | On-demand triage — scan spaces and categorize what needs attention |
+
+All tools automatically retry with a fresh OAuth token on 401 errors.
 
 ## The triage framework
 
@@ -185,23 +188,27 @@ The daily summary uses a `.last_run` file to automatically look back to the prev
 
 ## Trainable preferences
 
-Teach the agent what matters to you by copying `preferences.example.md` to `preferences.md` and editing it. You can also update it conversationally ("I don't care about help desk chatter"):
+Teach the agent what matters to you by copying `preferences.example.md` to `preferences.md` and editing it:
 
-```markdown
-## My Role & Focus
-- Lead engineer on the auth platform team
-
-## Always Relevant
-- API breaking changes
-- Security incidents
-
-## Never Relevant
-- General help desk chatter unless mentioned by name
-- Social/watercooler channels
-
-## Space-Specific Rules
-- In All-Hands: only flag if directly mentioned
+```bash
+cp preferences.example.md preferences.md
+# Edit with your spaces, role, and rules
 ```
+
+The preference file has these sections:
+
+| Section | Purpose |
+|---------|---------|
+| **My Role & Focus** | Who you are and what you care about (context for the AI) |
+| **Always Scan** | Spaces to always triage, grouped by priority tier (P1/P2/P3) |
+| **Mentions Only** | Large/noisy spaces — only included if you're @mentioned |
+| **Never Scan** | Skip entirely (social, off-topic, personal) |
+| **Space-Specific Rules** | Per-space instructions in natural language |
+| **Noise Patterns to Ignore** | Global filters (bot messages, greetings, automated alerts) |
+
+Priority tiers control ordering in triage output — P1 spaces appear first, P3 last.
+
+You can also update preferences conversationally via the `update_preferences` MCP tool.
 
 ## License
 
