@@ -3,6 +3,8 @@
 
 import os
 import sys
+import logging
+import re
 
 # Add parent directory so we can import webex_client
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -12,29 +14,61 @@ from mcp.server.fastmcp import FastMCP
 from webex_client import WebexClient
 
 mcp = FastMCP("webex")
+logger = logging.getLogger(__name__)
 
 _client = None
+_token_refreshed_at = None
 
 
-def get_client() -> WebexClient:
-    global _client
-    if _client is None:
-        # Try OAuth token first, fall back to env var
-        from oauth import get_valid_token
-        client_id = os.environ.get("WEBEX_CLIENT_ID", "")
-        client_secret = os.environ.get("WEBEX_CLIENT_SECRET", "")
-        token = ""
-        if client_id and client_secret:
-            token = get_valid_token(client_id, client_secret)
-        if not token:
-            token = os.environ.get("WEBEX_ACCESS_TOKEN", "")
-        if not token:
-            raise RuntimeError(
-                "No valid Webex token. Set WEBEX_CLIENT_ID + WEBEX_CLIENT_SECRET "
-                "(OAuth) or WEBEX_ACCESS_TOKEN in your environment."
-            )
+def _get_fresh_token() -> str:
+    """Get a valid token, refreshing via OAuth if possible."""
+    from oauth import get_valid_token
+    client_id = os.environ.get("WEBEX_CLIENT_ID", "")
+    client_secret = os.environ.get("WEBEX_CLIENT_SECRET", "")
+    token = ""
+    if client_id and client_secret:
+        token = get_valid_token(client_id, client_secret)
+    if not token:
+        token = os.environ.get("WEBEX_ACCESS_TOKEN", "")
+    if not token:
+        raise RuntimeError(
+            "No valid Webex token. Set WEBEX_CLIENT_ID + WEBEX_CLIENT_SECRET "
+            "(OAuth) or WEBEX_ACCESS_TOKEN in your environment."
+        )
+    return token
+
+
+def get_client(force_refresh: bool = False) -> WebexClient:
+    """Get a WebexClient, refreshing the token if needed.
+
+    On 401 errors, callers should call get_client(force_refresh=True) to retry.
+    """
+    global _client, _token_refreshed_at
+    if _client is None or force_refresh:
+        token = _get_fresh_token()
         _client = WebexClient(token)
+        _token_refreshed_at = datetime.now(timezone.utc)
+        if force_refresh:
+            logger.info("Token refreshed successfully")
     return _client
+
+
+def with_token_retry(fn):
+    """Decorator that retries a function once with a fresh token on auth failure."""
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            error_str = str(e).lower()
+            # Retry on 401 Unauthorized or token-related errors
+            if "401" in error_str or "unauthorized" in error_str or "token" in error_str:
+                logger.warning(f"Auth error in {fn.__name__}, refreshing token and retrying...")
+                get_client(force_refresh=True)
+                return fn(*args, **kwargs)
+            raise
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    return wrapper
 
 
 def parse_timeframe(timeframe: str) -> datetime:
@@ -69,6 +103,7 @@ def format_messages(messages: list[dict]) -> str:
 
 
 @mcp.tool()
+@with_token_retry
 def list_spaces(
     max_results: int = 50,
     space_type: str = "",
@@ -90,6 +125,7 @@ def list_spaces(
 
 
 @mcp.tool()
+@with_token_retry
 def get_messages(
     space_name: str,
     after: str = "",
@@ -116,6 +152,7 @@ def get_messages(
 
 
 @mcp.tool()
+@with_token_retry
 def search_messages(
     space_name: str,
     query: str,
@@ -143,6 +180,7 @@ def search_messages(
 
 
 @mcp.tool()
+@with_token_retry
 def get_space_details(space_name: str) -> str:
     """Get details about a specific Webex space.
 
@@ -163,6 +201,7 @@ def get_space_details(space_name: str) -> str:
 
 
 @mcp.tool()
+@with_token_retry
 def send_message(
     space_name: str,
     text: str,
@@ -182,6 +221,7 @@ def send_message(
 
 
 @mcp.tool()
+@with_token_retry
 def send_email(
     to: str,
     subject: str,
@@ -328,6 +368,7 @@ def search_knowledge(query: str = "") -> str:
 
 
 @mcp.tool()
+@with_token_retry
 def list_recordings(
     after: str = "30d",
     before: str = "",
@@ -358,6 +399,7 @@ def list_recordings(
 
 
 @mcp.tool()
+@with_token_retry
 def download_recording(
     recording_id: str,
     output_dir: str = "",
@@ -404,6 +446,296 @@ def _find_space(client: WebexClient, space_name: str) -> dict:
         return matches[0]
     # Return the most recently active match
     return matches[0]
+
+
+# --- Triage ---
+
+# Heuristic: Webex auto-names group chats as "Name Name, Name Name"
+_GROUP_CHAT_PATTERN = re.compile(r'^[A-Z]\w+(?: [A-Z]\w+)+(, [A-Z]\w+(?: [A-Z]\w+)+)+$')
+
+TRIAGE_PROMPT = """You are a chief-of-staff creating an actionable briefing for {user_email}.
+
+{prefs_block}
+
+Analyze this Webex conversation and categorize into EXACTLY these sections. Only include sections that have content — omit empty sections entirely.
+
+### Blocked on you
+People waiting for your input, approval, or response. These are the highest priority — someone else cannot move forward until you act.
+For each item: who is waiting, what they need, and a **suggested reply** you could send (in a quoted block).
+IMPORTANT: Do NOT include items here where the user sent the last message and is waiting for a reply. Those belong in "Waiting on others."
+
+### Waiting on others
+Threads where you've sent a message or made a request and are waiting for someone else to respond. Brief reminder of what you're waiting for and from whom.
+Do NOT include suggested replies here — you've already acted.
+
+### Decisions made without you
+Decisions, conclusions, or direction changes that happened in this conversation that affect your work. You weren't part of the decision but need to know about it.
+For each: what was decided, by whom, and whether you need to weigh in.
+
+### Opportunities to add value
+Discussions where your expertise or perspective could meaningfully help, but nobody has asked you directly.
+For each: what's being discussed, why your input matters, and a **suggested message** you could send (in a quoted block).
+
+### FYI
+Important context or updates — no action needed, but useful to know.
+
+RULES:
+- **DIRECTIONALITY IS CRITICAL.** Messages marked "**YOU ({user_email})**" were sent BY the user. Use these to determine who the ball is with:
+  - If the user sent the LAST message in a thread/topic, the ball is USUALLY with the other person. Do NOT put this in "Blocked on you."
+  - EXCEPTION: If the user's last message commits them to a future action (e.g., "I'll get back to you"), then the ball IS still with the user.
+  - "Blocked on you" means someone ELSE needs something from the user AND the user has not yet delivered it.
+- ERR ON THE SIDE OF OVER-INFORMING. When in doubt about whether something is relevant, include it.
+- ALWAYS include the space name at the start of each item
+- Be specific — include names, timestamps, and quote key phrases
+- Draft responses should be concise, professional, and ready to send
+- Don't include items where the user has already responded
+- Prioritize within each section (most urgent first)
+
+Space: {space_name}
+
+Transcript:
+{transcript}"""
+
+
+def _load_preferences() -> str:
+    prefs_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "preferences.md")
+    if os.path.exists(prefs_path):
+        with open(prefs_path) as f:
+            return f.read()
+    return ""
+
+
+def _parse_space_lists(preferences: str) -> tuple[set, set]:
+    """Parse 'Always Scan' and 'Never Scan' space names from preferences."""
+    always_scan = set()
+    never_scan = set()
+    current_section = None
+    for line in preferences.split("\n"):
+        stripped = line.strip()
+        lower = stripped.lower()
+        if lower.startswith("## always scan"):
+            current_section = "always"
+            continue
+        elif lower.startswith("## never scan"):
+            current_section = "never"
+            continue
+        elif stripped.startswith("## "):
+            current_section = None
+            continue
+        if not stripped or stripped.startswith("<!--") or stripped.startswith("###"):
+            continue
+        if stripped.startswith("- ") and current_section:
+            name = stripped[2:].strip()
+            if name:
+                if current_section == "always":
+                    always_scan.add(name.lower())
+                elif current_section == "never":
+                    never_scan.add(name.lower())
+    return always_scan, never_scan
+
+
+def _is_group_chat(space: dict) -> bool:
+    title = space.get("title", "")
+    return bool(_GROUP_CHAT_PATTERN.match(title))
+
+
+def _format_messages_with_user(messages: list[dict], user_email: str) -> str:
+    lines = []
+    for msg in reversed(messages):
+        sender = msg.get("personEmail", "Unknown")
+        timestamp = msg.get("created", "")[:16].replace("T", " ")
+        text = msg.get("text", "[non-text content]")
+        if user_email and sender.lower() == user_email.lower():
+            lines.append(f"[{timestamp}] **YOU ({sender})**: {text}")
+        else:
+            lines.append(f"[{timestamp}] {sender}: {text}")
+    return "\n".join(lines)
+
+
+def _triage_space_with_claude(transcript: str, space_name: str, user_email: str) -> str:
+    """Triage a single space's transcript using Claude."""
+    import anthropic
+
+    preferences = _load_preferences()
+    prefs_block = f"USER PREFERENCES (use these to judge relevance):\n{preferences}" if preferences else ""
+
+    use_bedrock = os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "true"
+    if use_bedrock:
+        client = anthropic.AnthropicBedrock(aws_profile=os.environ.get("AWS_PROFILE", "default"))
+        model = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+    else:
+        client = anthropic.Anthropic()
+        model = "claude-sonnet-4-6-20250514"
+
+    prompt = TRIAGE_PROMPT.format(
+        user_email=user_email,
+        prefs_block=prefs_block,
+        space_name=space_name,
+        transcript=transcript,
+    )
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=3000,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.content[0].text
+
+
+def _parse_triage_sections(triage_text: str, space_title: str) -> dict:
+    """Parse triage output into categorized sections."""
+    sections = {"blocked": [], "waiting": [], "decisions": [], "opportunities": [], "fyi": []}
+    current_section = None
+    current_lines = []
+
+    for line in triage_text.split("\n"):
+        lower = line.lower().strip().replace("*", "").replace("#", "").strip()
+        detected = None
+        if "blocked on you" in lower:
+            detected = "blocked"
+        elif "waiting on others" in lower:
+            detected = "waiting"
+        elif "decisions made without you" in lower:
+            detected = "decisions"
+        elif "opportunities to add value" in lower:
+            detected = "opportunities"
+        elif lower.startswith("fyi"):
+            detected = "fyi"
+
+        if detected:
+            if current_section and current_lines:
+                content = "\n".join(current_lines).strip()
+                if content:
+                    sections[current_section].append(f"**{space_title}**\n{content}")
+            current_section = detected
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    if current_section and current_lines:
+        content = "\n".join(current_lines).strip()
+        if content:
+            sections[current_section].append(f"**{space_title}**\n{content}")
+
+    return sections
+
+
+@mcp.tool()
+@with_token_retry
+def triage(
+    lookback: str = "12h",
+    max_spaces: int = 15,
+) -> str:
+    """Run a full Webex triage — scan relevant spaces and categorize what needs attention.
+
+    Returns a structured briefing with sections:
+    - Blocked on you (highest priority — someone is waiting)
+    - Waiting on others (you've acted, ball is with them)
+    - Decisions made without you (need to review)
+    - Opportunities to add value (proactive engagement)
+    - FYI (context, no action needed)
+
+    Uses preferences.md to determine which spaces to scan and what's relevant.
+
+    Args:
+        lookback: How far back to look (e.g., "12h", "1d", "3d"). Default: 12 hours.
+        max_spaces: Maximum number of spaces to analyze (default 15)
+    """
+    client = get_client()
+    user_email = os.environ.get("SUMMARY_USER_EMAIL", "benmyers@cisco.com")
+    lookback_dt = parse_timeframe(lookback)
+    lookback_utc = lookback_dt.astimezone(timezone.utc) if lookback_dt.tzinfo else lookback_dt.replace(tzinfo=timezone.utc)
+
+    preferences = _load_preferences()
+    always_scan, never_scan = _parse_space_lists(preferences)
+
+    # Fetch all spaces and filter by activity window
+    all_spaces = client.list_spaces(max_results=200)
+    active_spaces = []
+    for space in all_spaces:
+        last_activity = space.get("lastActivity", "")
+        if last_activity:
+            activity_time = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
+            if activity_time < lookback_utc:
+                continue
+        active_spaces.append(space)
+
+    # Determine relevant spaces
+    relevant_spaces = []
+    for space in active_spaces:
+        title = space.get("title", "")
+        title_lower = title.lower()
+
+        if title_lower in never_scan:
+            continue
+
+        space_type = space.get("type", "group")
+        if space_type == "direct" or _is_group_chat(space) or title_lower in always_scan:
+            relevant_spaces.append(space)
+        # For other channels, we'd need to check mentions — skip for now to keep it fast
+        # (the daily_summary.py script does this, but it's slow per-space)
+
+        if len(relevant_spaces) >= max_spaces:
+            break
+
+    if not relevant_spaces:
+        return "No spaces with recent activity found in the lookback window."
+
+    # Triage each space
+    all_sections = {"blocked": [], "waiting": [], "decisions": [], "opportunities": [], "fyi": []}
+    skipped = []
+
+    for space in relevant_spaces:
+        messages = client.get_messages(space["id"], after=lookback_dt, max_results=200)
+        if not messages or len(messages) < 2:
+            continue
+
+        transcript = _format_messages_with_user(messages, user_email)
+        try:
+            triage_text = _triage_space_with_claude(transcript, space["title"], user_email)
+        except Exception as e:
+            skipped.append(f"{space['title']}: {e}")
+            continue
+
+        if "no items requiring your attention" in triage_text.lower():
+            continue
+
+        sections = _parse_triage_sections(triage_text, space["title"])
+        for key in all_sections:
+            all_sections[key].extend(sections[key])
+
+    # Build output
+    if not any(all_sections.values()):
+        return "No actionable items found across your Webex spaces."
+
+    now_str = datetime.now().strftime("%Y-%m-%d %I:%M %p")
+    parts = [f"# Webex Triage — {now_str}\n*Looked back {lookback}, scanned {len(relevant_spaces)} spaces*"]
+
+    if all_sections["blocked"]:
+        parts.append("## Blocked on You\n" + "\n\n".join(all_sections["blocked"]))
+    if all_sections["waiting"]:
+        parts.append("## Waiting on Others\n" + "\n\n".join(all_sections["waiting"]))
+    if all_sections["decisions"]:
+        parts.append("## Decisions Made Without You\n" + "\n\n".join(all_sections["decisions"]))
+    if all_sections["opportunities"]:
+        parts.append("## Opportunities to Add Value\n" + "\n\n".join(all_sections["opportunities"]))
+    if all_sections["fyi"]:
+        parts.append("## FYI\n" + "\n\n".join(all_sections["fyi"]))
+
+    if skipped:
+        parts.append("## Errors\n" + "\n".join(f"- {s}" for s in skipped))
+
+    result = "\n\n---\n\n".join(parts)
+
+    # Save locally for other tools to read
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output")
+    os.makedirs(output_dir, exist_ok=True)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    output_path = os.path.join(output_dir, f"{today_str}-triage.md")
+    with open(output_path, "w") as f:
+        f.write(result)
+
+    return result
 
 
 if __name__ == "__main__":
