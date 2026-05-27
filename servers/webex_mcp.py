@@ -460,36 +460,62 @@ TRIAGE_PROMPT = """You are a chief-of-staff creating an actionable briefing for 
 Analyze this Webex conversation and categorize into EXACTLY these sections. Only include sections that have content — omit empty sections entirely.
 
 ### Blocked on you
-People waiting for your input, approval, or response. These are the highest priority — someone else cannot move forward until you act.
-For each item: who is waiting, what they need, and a **suggested reply** you could send (in a quoted block).
-IMPORTANT: Do NOT include items here where the user sent the last message and is waiting for a reply. Those belong in "Waiting on others."
+Someone ELSE has explicitly asked you a question, requested your input/approval, or is waiting for something you committed to deliver — AND you have not yet responded or delivered.
+
+STRICT CRITERIA (all must be true):
+1. Another person made a clear request or asked a direct question TO the user
+2. The user has NOT yet responded to that specific request
+3. The other person cannot reasonably proceed without the user's input
+
+DO NOT include:
+- Items where the user sent the last message (those go in "Waiting on others")
+- Items where the user ASKED a question to someone else (that's the user waiting, not blocked)
+- Vague "you might want to follow up" situations with no explicit ask
+- Bot messages or automated notifications
+- Items where the user offered help but the other person hasn't responded with what they need (that's waiting, not blocked)
+
+For each item: who is waiting, what specifically they asked for, how long they've been waiting, and a **draft reply** (in a quoted block) that's concise and ready to send.
 
 ### Waiting on others
-Threads where you've sent a message or made a request and are waiting for someone else to respond. Brief reminder of what you're waiting for and from whom.
+The user sent the last message OR made a request and is waiting for someone else to respond. Brief reminder of what you're waiting for and from whom.
 Do NOT include suggested replies here — you've already acted.
 
 ### Decisions made without you
-Decisions, conclusions, or direction changes that happened in this conversation that affect your work. You weren't part of the decision but need to know about it.
-For each: what was decided, by whom, and whether you need to weigh in.
+Concrete decisions, conclusions, or direction changes that happened without the user's involvement but affect their work. Must be an actual decision (not just a discussion or FYI).
+For each: what was decided, by whom, and whether you need to weigh in or just be aware.
 
 ### Opportunities to add value
-Discussions where your expertise or perspective could meaningfully help, but nobody has asked you directly.
-For each: what's being discussed, why your input matters, and a **suggested message** you could send (in a quoted block).
+Discussions where the user's specific expertise would CHANGE THE OUTCOME — not just where they could chime in. The bar is: would this discussion go meaningfully differently with the user's input?
+
+Only include if:
+- The topic directly overlaps with the user's stated responsibilities
+- There's a knowledge gap the user can uniquely fill
+- A decision is being made that the user has context others don't
+
+Do NOT include:
+- General discussions the user might find interesting (those are FYI)
+- Threads where awareness is sufficient
+- Conversations that are proceeding fine without intervention
+
+For each: what's being discussed, what specific knowledge/context the user has that others don't, and a **draft message** (in a quoted block).
 
 ### FYI
-Important context or updates — no action needed, but useful to know.
+Important context or updates — no action needed, but useful to know. Keep each item to 1-2 lines.
 
 RULES:
-- **DIRECTIONALITY IS CRITICAL.** Messages marked "**YOU ({user_email})**" were sent BY the user. Use these to determine who the ball is with:
-  - If the user sent the LAST message in a thread/topic, the ball is USUALLY with the other person. Do NOT put this in "Blocked on you."
-  - EXCEPTION: If the user's last message commits them to a future action (e.g., "I'll get back to you"), then the ball IS still with the user.
-  - "Blocked on you" means someone ELSE needs something from the user AND the user has not yet delivered it.
-- ERR ON THE SIDE OF OVER-INFORMING. When in doubt about whether something is relevant, include it.
-- ALWAYS include the space name at the start of each item
+- **DIRECTIONALITY IS CRITICAL.** Messages marked "**YOU ({user_email})**" were sent BY the user.
+  - If the user sent the LAST message in a thread/topic → "Waiting on others" (not "Blocked on you")
+  - If the user's last message commits them to a future action (e.g., "I'll get back to you", "Let me look into that") → "Blocked on you" ONLY if there's a clear deliverable they haven't completed
+  - If the user offered help and the other person hasn't responded → "Waiting on others"
+  - Read message content carefully — understand obligations, not just sequence
+- **NO DUPLICATES.** Each item appears in exactly ONE section. Pick the most appropriate one.
+- **NO BOT MESSAGES.** Automated messages, notifications, and bot posts are never "Blocked on you." At most they're FYI.
 - Be specific — include names, timestamps, and quote key phrases
-- Draft responses should be concise, professional, and ready to send
-- Don't include items where the user has already responded
+- Draft replies should match the tone of the space (casual for DMs/small groups, structured for channels)
+- Do NOT include the space name in your output — it will be added automatically
 - Prioritize within each section (most urgent first)
+- Only skip topics the user has explicitly marked as irrelevant in preferences
+- If nothing requires attention, respond with exactly: "No items requiring your attention."
 
 Space: {space_name}
 
@@ -804,7 +830,13 @@ def triage(
         max_spaces: Maximum number of spaces to analyze (default 15)
     """
     client = get_client()
-    user_email = os.environ.get("SUMMARY_USER_EMAIL", "benmyers@cisco.com")
+    user_email = os.environ.get("SUMMARY_USER_EMAIL", "")
+    if not user_email:
+        try:
+            me = client.get_me()
+            user_email = me.get("emails", [""])[0]
+        except Exception:
+            pass
     lookback_dt = parse_timeframe(lookback)
     lookback_utc = lookback_dt.astimezone(timezone.utc) if lookback_dt.tzinfo else lookback_dt.replace(tzinfo=timezone.utc)
 

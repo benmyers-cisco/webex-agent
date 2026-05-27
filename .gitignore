@@ -2,7 +2,9 @@
 .webex_token.json
 preferences.md
 .last_run
+.known_spaces.json
 knowledge.md
+decision-log.json
 __pycache__/
 *.pyc
 .venv/

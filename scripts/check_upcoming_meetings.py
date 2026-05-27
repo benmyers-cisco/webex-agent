@@ -21,18 +21,25 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
 
-WINDOW_MINUTES = 10
-HISTORY_LOOKBACK_DAYS = 14
+WINDOW_MINUTES = int(os.environ.get("MEETING_WINDOW_MINUTES", "10"))
+HISTORY_LOOKBACK_DAYS = int(os.environ.get("MEETING_HISTORY_DAYS", "14"))
+
+# Paths — configurable via env vars, with sensible defaults
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MEETINGS_DIR = os.path.expanduser(
-    "~/.claude/projects/-Users-benmyers/memory/meetings"
+    os.environ.get("MEETINGS_DIR", "~/.claude/memory/meetings")
 )
 NOTES_DIR = os.path.expanduser(
-    "~/.claude/projects/-Users-benmyers/memory/notes"
+    os.environ.get("NOTES_DIR", "~/.claude/memory/notes")
 )
-TOKEN_FILE = os.path.expanduser("~/Projects/webex-agent/.webex_token.json")
-SLACK_ENV_FILE = os.path.expanduser("~/Projects/claude-remote-slack/.env")
-SLACK_USER_ID = os.environ.get("SLACK_USER_ID", "U0ATG4ZAHPE")
-WEBEX_AGENT_DIR = os.path.expanduser("~/Projects/webex-agent")
+TOKEN_FILE = os.path.expanduser(
+    os.environ.get("WEBEX_TOKEN_FILE", os.path.join(_PROJECT_DIR, ".webex_token.json"))
+)
+SLACK_ENV_FILE = os.path.expanduser(
+    os.environ.get("SLACK_ENV_FILE", "~/Projects/claude-remote-slack/.env")
+)
+SLACK_USER_ID = os.environ.get("SLACK_USER_ID", "")
+WEBEX_AGENT_DIR = _PROJECT_DIR
 
 # Try to import webex-agent dependencies (available when run from its venv)
 _HAS_WEBEX_CLIENT = False

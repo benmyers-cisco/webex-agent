@@ -32,34 +32,44 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure environment
+### 2. Run the setup wizard
 
 ```bash
-cp .env.example .env
+python scripts/setup.py
 ```
 
-Edit `.env` with your credentials. See [Authentication](#authentication) for details.
+This walks you through environment config, OAuth, preferences, and verification interactively.
+
+Or do it manually:
+
+```bash
+cp .env.example .env        # Edit with your credentials
+cp preferences.example.md preferences.md  # Edit with your spaces/role
+set -a && source .env && set +a
+python servers/oauth.py     # Complete OAuth flow in browser
+```
 
 ### 3. Enable the plugin in Claude Code
 
 Add the plugin directory to your Claude Code project or install it as a plugin. The `.claude-plugin/plugin.json` and `.mcp.json` configure the MCP server automatically.
 
-### 4. Authenticate with Webex
+### 4. Run onboarding
 
-```bash
-set -a && source .env && set +a
-python servers/oauth.py
+Open Claude Code in the webex-agent directory and run:
+
+```
+/webex-onboard
 ```
 
-This opens a browser for Webex OAuth authorization. Tokens are saved to `.webex_token.json` and auto-refresh.
+This interactive skill walks you through configuring your role, classifying your spaces, and running your first calibration triage (~5-10 min).
 
 ### 5. Start using it
-
-Open Claude Code and ask:
 
 - "What needs my attention in Webex?"
 - "Summarize the Project Alpha space from the last 3 days"
 - "Search for discussions about the API migration"
+- `/webex-triage` — on-demand triage briefing
+- `/webex-triage teach` — update relevance preferences
 
 ## Authentication
 
@@ -94,14 +104,19 @@ Note: Personal tokens expire after 12 hours.
 | `WEBEX_CLIENT_ID` | For OAuth | Webex integration client ID |
 | `WEBEX_CLIENT_SECRET` | For OAuth | Webex integration client secret |
 | `WEBEX_ACCESS_TOKEN` | For token auth | Personal access token (fallback if OAuth not configured) |
-| `SUMMARY_USER_EMAIL` | No | Your Webex email (default: used for identifying your messages in triage) |
+| `SUMMARY_USER_EMAIL` | No | Your Webex email (used to identify your messages in triage) |
 | `SUMMARY_DELIVERY` | No | Delivery method: `webex`, `email`, or `both` |
 | `SUMMARY_WEBEX_SPACE` | No | Webex space name to post briefings to |
 | `SUMMARY_EMAIL_TO` | No | Email address for briefing delivery |
 | `SUMMARY_LOOKBACK_H` | No | Override lookback hours for daily summary |
-| `SLACK_USER_ID` | No | Your Slack user ID (for pre-meeting briefing DMs) |
 | `CLAUDE_CODE_USE_BEDROCK` | No | Set to `true` if using Claude via AWS Bedrock |
 | `AWS_PROFILE` | No | AWS profile for Bedrock access |
+| `SLACK_USER_ID` | No | Your Slack user ID (for pre-meeting briefing DMs) |
+| `SLACK_ENV_FILE` | No | Path to Slack bot .env file (for pre-meeting DMs) |
+| `MEETINGS_DIR` | No | Path to meeting tracking files (default: `~/.claude/memory/meetings`) |
+| `NOTES_DIR` | No | Path to notes directory (default: `~/.claude/memory/notes`) |
+| `MEETING_WINDOW_MINUTES` | No | Minutes before meeting to trigger prep (default: 10) |
+| `MEETING_HISTORY_DAYS` | No | Days of DM history to pull for meeting prep (default: 14) |
 
 ## Project structure
 
@@ -119,6 +134,7 @@ webex-agent/
     run_summary.sh          # Manual summary runner
     run_retro.sh            # Manual retro runner
   skills/
+    webex-onboard.md        # Interactive first-time setup (run after install)
     webex-triage.md         # Shareable triage skill (no infra needed)
     weekly-retrospective/   # Weekly learning extraction methodology
     decision-log/           # Decision capture from conversations
@@ -157,15 +173,23 @@ The core value of this plugin is how it decides what deserves your attention:
 **Space selection:**
 - DMs and small group chats (<=10 people): always included if there's new activity
 - Large channels (>10 people): only if you're @mentioned and haven't responded, or you were newly added in the last 24 hours
+- Spaces in "Always Scan" preferences: included if they have any activity in the lookback window
+- Spaces in "Never Scan": skipped entirely (zero API calls)
 
 **Priority buckets:**
-1. **Blocked on You** — someone can't move forward without your input (includes draft responses)
-2. **Waiting on Others** — threads where you've acted and are awaiting a reply
-3. **Decisions Made Without You** — things decided that affect your work
-4. **Opportunities to Add Value** — where your expertise could help proactively (includes draft messages)
+1. **Blocked on You** — someone explicitly asked you something or is waiting for a deliverable you committed to, and you haven't responded. Strict criteria: must be a clear ask, not a vague suggestion.
+2. **Waiting on Others** — threads where you sent the last message or made a request
+3. **Decisions Made Without You** — concrete decisions that affect your work
+4. **Opportunities to Add Value** — discussions where your specific expertise would change the outcome (high bar — not just "could chime in")
 5. **FYI** — context only, no action needed
 
 Results are grouped by priority across all spaces, not per-space — so the most urgent items are always at the top.
+
+**New space detection:**
+- The agent tracks which spaces it has seen across runs (`.known_spaces.json`)
+- When a new channel appears in your triage for the first time, it generates a classification suggestion (Always Scan P1/P2/P3, Mentions Only, or Never Scan) based on the content it analyzed
+- DMs and group chats are labeled "no action needed" since they're always scanned
+- Confirm or override suggestions via the `update_preferences` MCP tool
 
 ## Using the triage skill standalone
 

@@ -237,13 +237,21 @@ def deliver_webex(webex: WebexClient, content: str, space_name: str):
 def main():
     lookback_days = int(os.environ.get("RETRO_LOOKBACK_DAYS", "7"))
     delivery_space = os.environ.get("SUMMARY_WEBEX_SPACE", "")
-    user_email = os.environ.get("SUMMARY_USER_EMAIL", "benmyers@cisco.com")
+    user_email = os.environ.get("SUMMARY_USER_EMAIL", "")
 
     after = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     preferences = load_preferences()
     existing_knowledge = load_knowledge()
 
     webex = get_webex_client()
+
+    # Auto-detect user email if not configured
+    if not user_email:
+        try:
+            me = webex.get_me()
+            user_email = me.get("emails", [""])[0]
+        except Exception:
+            pass
     claude = get_claude_client()
 
     print(f"Building weekly retrospective (last {lookback_days} days)...")

@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from oauth import get_valid_token
 
 LAST_RUN_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".last_run")
+KNOWN_SPACES_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".known_spaces.json")
 DEFAULT_LOOKBACK_H = 12
 
 
@@ -47,6 +48,28 @@ def save_run_timestamp():
     """Record when this run started."""
     with open(LAST_RUN_FILE, "w") as f:
         f.write(datetime.now(timezone.utc).isoformat())
+
+
+def load_known_spaces() -> dict[str, str]:
+    """Load previously seen space IDs → titles."""
+    if os.path.exists(KNOWN_SPACES_FILE):
+        try:
+            with open(KNOWN_SPACES_FILE) as f:
+                return json.load(f)
+        except (ValueError, OSError):
+            pass
+    return {}
+
+
+def save_known_spaces(spaces: dict[str, str]):
+    """Persist current set of known space IDs → titles."""
+    with open(KNOWN_SPACES_FILE, "w") as f:
+        json.dump(spaces, f, indent=2)
+
+
+def detect_new_spaces(relevant_spaces: list[dict], known: dict[str, str]) -> list[dict]:
+    """Find spaces in the relevant set that we haven't seen before."""
+    return [s for s in relevant_spaces if s["id"] not in known]
 
 
 def get_webex_client() -> WebexClient:
@@ -98,38 +121,62 @@ def triage_with_claude(client, transcript: str, space_name: str, user_email: str
 Analyze this Webex conversation and categorize into EXACTLY these sections. Only include sections that have content — omit empty sections entirely.
 
 ### Blocked on you
-People waiting for your input, approval, or response. These are the highest priority — someone else cannot move forward until you act.
-For each item: who is waiting, what they need, and a **suggested reply** you could send (in a quoted block).
-IMPORTANT: Do NOT include items here where the user sent the last message and is waiting for a reply. Those belong in "Waiting on others."
+Someone ELSE has explicitly asked you a question, requested your input/approval, or is waiting for something you committed to deliver — AND you have not yet responded or delivered.
+
+STRICT CRITERIA (all must be true):
+1. Another person made a clear request or asked a direct question TO the user
+2. The user has NOT yet responded to that specific request
+3. The other person cannot reasonably proceed without the user's input
+
+DO NOT include:
+- Items where the user sent the last message (those go in "Waiting on others")
+- Items where the user ASKED a question to someone else (that's the user waiting, not blocked)
+- Vague "you might want to follow up" situations with no explicit ask
+- Bot messages or automated notifications
+- Items where the user offered help but the other person hasn't responded with what they need (that's waiting, not blocked)
+
+For each item: who is waiting, what specifically they asked for, how long they've been waiting, and a **draft reply** (in a quoted block) that's concise and ready to send.
 
 ### Waiting on others
-Threads where you've sent a message or made a request and are waiting for someone else to respond. Brief reminder of what you're waiting for and from whom.
+The user sent the last message OR made a request and is waiting for someone else to respond. Brief reminder of what you're waiting for and from whom.
 Do NOT include suggested replies here — you've already acted.
 
 ### Decisions made without you
-Decisions, conclusions, or direction changes that happened in this conversation that affect your work. You weren't part of the decision but need to know about it.
-For each: what was decided, by whom, and whether you need to weigh in.
+Concrete decisions, conclusions, or direction changes that happened without the user's involvement but affect their work. Must be an actual decision (not just a discussion or FYI).
+For each: what was decided, by whom, and whether you need to weigh in or just be aware.
 
 ### Opportunities to add value
-Discussions where your expertise or perspective could meaningfully help, but nobody has asked you directly. These are chances to be proactive.
-For each: what's being discussed, why your input matters, and a **suggested message** you could send (in a quoted block).
+Discussions where the user's specific expertise would CHANGE THE OUTCOME — not just where they could chime in. The bar is: would this discussion go meaningfully differently with the user's input?
+
+Only include if:
+- The topic directly overlaps with the user's stated responsibilities
+- There's a knowledge gap the user can uniquely fill
+- A decision is being made that the user has context others don't
+
+Do NOT include:
+- General discussions the user might find interesting (those are FYI)
+- Threads where awareness is sufficient
+- Conversations that are proceeding fine without intervention
+
+For each: what's being discussed, what specific knowledge/context the user has that others don't, and a **draft message** (in a quoted block).
 
 ### FYI
-Important context or updates — no action needed, but useful to know.
+Important context or updates — no action needed, but useful to know. Keep each item to 1-2 lines.
 
 RULES:
-- **DIRECTIONALITY IS CRITICAL.** Messages marked "**YOU ({user_email})**" were sent BY the user. Use these to determine who the ball is with:
-  - If the user sent the LAST message in a thread/topic, the ball is USUALLY with the other person. The user is likely waiting for their response. Do NOT put this in "Blocked on you."
-  - EXCEPTION: If the user's last message commits them to a future action (e.g., "I'll get back to you", "Let me look into that", "I'll send it over", "Will do"), then the ball IS still with the user — flag it appropriately.
-  - "Blocked on you" means someone ELSE needs something from the user AND the user has not yet delivered it.
-  - Read the content of the user's messages carefully — don't just check who spoke last, understand what was said and what obligations remain.
-- ERR ON THE SIDE OF OVER-INFORMING. When in doubt about whether something is relevant, include it. It's better to flag something the user can quickly skip than to miss something important. Only respond with "No items requiring your attention." if the conversation is truly unrelated to their work.
-- ALWAYS include the space name "{space_name}" at the start of each item so the user knows exactly where to find and reply to the conversation
+- **DIRECTIONALITY IS CRITICAL.** Messages marked "**YOU ({user_email})**" were sent BY the user.
+  - If the user sent the LAST message in a thread/topic → "Waiting on others" (not "Blocked on you")
+  - If the user's last message commits them to a future action (e.g., "I'll get back to you", "Let me look into that") → "Blocked on you" ONLY if there's a clear deliverable they haven't completed
+  - If the user offered help and the other person hasn't responded → "Waiting on others"
+  - Read message content carefully — understand obligations, not just sequence
+- **NO DUPLICATES.** Each item appears in exactly ONE section. Pick the most appropriate one.
+- **NO BOT MESSAGES.** Automated messages, notifications, and bot posts are never "Blocked on you." At most they're FYI.
 - Be specific — include names, timestamps, and quote key phrases
-- Draft responses should be concise, professional, and ready to send with minimal editing
-- Don't include items where {user_email} has already responded
+- Draft replies should match the tone of the space (casual for DMs/small groups, structured for channels)
+- Do NOT include the space name in your output — it will be added automatically
 - Prioritize within each section (most urgent first)
-- Only skip topics/spaces the user has explicitly marked as irrelevant in preferences
+- Only skip topics the user has explicitly marked as irrelevant in preferences
+- If nothing requires attention, respond with exactly: "No items requiring your attention."
 
 Space: {space_name}
 
@@ -352,10 +399,22 @@ def main():
     delivery = os.environ.get("SUMMARY_DELIVERY", "webex")
     delivery_space = os.environ.get("SUMMARY_WEBEX_SPACE", "")
     delivery_email = os.environ.get("SUMMARY_EMAIL_TO", "")
-    user_email = os.environ.get("SUMMARY_USER_EMAIL", "benmyers@cisco.com")
+    user_email = os.environ.get("SUMMARY_USER_EMAIL", "")
 
     webex = get_webex_client()
     claude = get_claude_client()
+
+    # Auto-detect user email from Webex API if not configured
+    if not user_email:
+        try:
+            me = webex.get_me()
+            user_email = me.get("emails", [""])[0]
+            if user_email:
+                print(f"  Auto-detected email: {user_email}")
+        except Exception:
+            pass
+    if not user_email:
+        print("Warning: SUMMARY_USER_EMAIL not set and auto-detect failed. Triage directionality will be impaired.", file=sys.stderr)
 
     print(f"Looking back {lookback_hours}h (since {after.strftime('%Y-%m-%d %H:%M UTC')})...")
     target_spaces = find_my_relevant_spaces(webex, lookback=after, max_spaces=20)
@@ -367,12 +426,28 @@ def main():
 
     print(f"Found {len(target_spaces)} relevant spaces. Triaging...")
 
+    # Detect newly-appeared spaces (not in our known set from previous runs)
+    known_spaces = load_known_spaces()
+    new_spaces = detect_new_spaces(target_spaces, known_spaces)
+    if new_spaces:
+        print(f"  {len(new_spaces)} new space(s) detected since last run.")
+
+    # Update known spaces with everything we see now
+    current_spaces = {s["id"]: s.get("title", "") for s in target_spaces}
+    # Merge (keep old ones too — a space disappearing from one run doesn't mean it's gone)
+    known_spaces.update(current_spaces)
+    save_known_spaces(known_spaces)
+
+    # Build set of new channel IDs (DMs don't need classification — always scanned)
+    new_channel_ids = {s["id"] for s in new_spaces if s.get("type") != "direct" and not _is_group_chat(s)}
+
     # Triage each space
     blocked_parts = []
     waiting_parts = []
     decisions_parts = []
     opportunities_parts = []
     fyi_parts = []
+    new_channel_triage_results = {}  # space_id → (title, triage_text, had_actionable_content)
 
     for space in target_spaces:
         messages = webex.get_messages(space["id"], after=after, max_results=200)
@@ -381,6 +456,12 @@ def main():
         print(f"  Analyzing '{space['title']}' ({len(messages)} messages)...")
         transcript = format_messages(messages, user_email)
         triage = triage_with_claude(claude, transcript, space["title"], user_email)
+
+        # Track triage results for new channels (before skipping)
+        if space["id"] in new_channel_ids:
+            had_content = "no items requiring your attention" not in triage.lower()
+            new_channel_triage_results[space["id"]] = (space["title"], triage, had_content)
+
         if "no items requiring your attention" in triage.lower():
             print(f"    -> Nothing relevant, skipping.")
             continue
@@ -426,7 +507,7 @@ def main():
             _append_section(current_section, current_lines, space["title"],
                             blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
 
-    if not any([blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts]):
+    if not any([blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts]) and not new_spaces:
         print("No actionable items found.")
         save_run_timestamp()
         return
@@ -445,6 +526,35 @@ def main():
         parts.append("## 🟢 Opportunities to Add Value\n" + "\n".join(opportunities_parts))
     if fyi_parts:
         parts.append("## ℹ️ FYI\n" + "\n".join(fyi_parts))
+
+    # New spaces section — with AI-suggested classifications for channels
+    if new_spaces:
+        new_space_lines = []
+
+        # Separate DMs/group chats (no classification needed) from channels
+        new_dms = [s for s in new_spaces if s.get("type") == "direct" or _is_group_chat(s)]
+        new_channels = [s for s in new_spaces if s.get("type") != "direct" and not _is_group_chat(s)]
+
+        if new_channels:
+            new_space_lines.append("**New channels — consider adding to preferences:**\n")
+            for s in new_channels:
+                title = s.get("title", "Unknown")
+                result = new_channel_triage_results.get(s["id"])
+                if result:
+                    _, triage_text, had_content = result
+                    suggestion = _suggest_classification(title, triage_text, had_content)
+                else:
+                    suggestion = "Mentions Only (no messages in lookback window)"
+                new_space_lines.append(f"- **{title}** → *{suggestion}*")
+
+        if new_dms:
+            new_space_lines.append("\n**New DMs/group chats (always scanned, no action needed):**\n")
+            for s in new_dms:
+                title = s.get("title", "Unknown")
+                type_label = "DM" if s.get("type") == "direct" else "Group Chat"
+                new_space_lines.append(f"- {title} ({type_label})")
+
+        parts.append("## 🆕 New Spaces\n" + "\n".join(new_space_lines))
 
     full_summary = "\n\n---\n\n".join(parts)
 
@@ -468,11 +578,57 @@ def main():
     save_run_timestamp()
 
 
+def _suggest_classification(title: str, triage_text: str, had_actionable_content: bool) -> str:
+    """Generate a classification suggestion based on triage results.
+
+    Returns a human-readable suggestion like 'Always Scan P2 (active project discussion)'
+    """
+    title_lower = title.lower()
+
+    # If the triage found actionable items (blocked, decisions, opportunities), suggest Always Scan
+    if had_actionable_content:
+        triage_lower = triage_text.lower()
+        has_blocked = "blocked on you" in triage_lower and "no items" not in triage_lower.split("blocked on you")[1][:100]
+        has_decisions = "decisions made without you" in triage_lower
+
+        if has_blocked or has_decisions:
+            # High relevance — suggest P1 or P2
+            if "proj-" in title_lower or "squad" in title_lower:
+                return "Suggest: Always Scan P1 (project space with items requiring your attention)"
+            return "Suggest: Always Scan P2 (had actionable items for you)"
+        else:
+            # Some content but lower urgency
+            return "Suggest: Always Scan P3 (relevant discussion, awareness-level)"
+
+    # No actionable content found
+    if "help-" in title_lower or "ask " in title_lower.lower():
+        return "Suggest: Mentions Only (support/help channel — only flag if you're @mentioned)"
+    if "proj-" in title_lower:
+        return "Suggest: Always Scan P3 (project space, quiet this run but likely relevant)"
+
+    return "Suggest: Mentions Only (no actionable content this run)"
+
+
+_EMPTY_SECTION_PHRASES = [
+    "nothing in this conversation",
+    "no items",
+    "no action needed",
+    "nothing is currently blocking",
+    "nothing requiring your attention",
+    "none identified",
+    "n/a",
+]
+
+
 def _append_section(section: str, lines: list[str], space_title: str,
                     blocked: list, waiting: list, decisions: list, opportunities: list, fyi: list):
     """Append parsed section content to the appropriate list."""
     content = "\n".join(lines).strip()
     if not content:
+        return
+    # Skip sections where the model said "nothing here"
+    content_lower = content.lower()
+    if any(phrase in content_lower for phrase in _EMPTY_SECTION_PHRASES):
         return
     entry = f"**{space_title}**\n{content}\n"
     if section == "blocked":
