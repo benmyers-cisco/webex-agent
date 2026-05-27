@@ -6,7 +6,7 @@ A Claude Code plugin that connects to Webex as a conversational "chief of staff"
 
 - **Triage briefings** — Scans your spaces and categorizes what needs attention into four priority levels: blocked on you, decisions made without you, opportunities to add value, and FYI
 - **Conversational agent** — Ask natural questions like "what did I miss?" or "summarize the Security Team space this week"
-- **Smart space selection** — DMs and small group chats always included; large channels only if you're @mentioned or newly added
+- **Smart space selection** — DMs and small group chats always included; large channels only if you're @mentioned or have active watched threads
 - **Draft responses** — Generates ready-to-send replies for items that need your attention
 - **Trainable preferences** — Teach it what's relevant to you over time
 - **Scheduled briefings** — Automated daily triage and weekly retrospectives via cron
@@ -227,12 +227,16 @@ The preference file has these sections:
 |---------|---------|
 | **My Role & Focus** | Who you are and what you care about (context for the AI) |
 | **Always Scan** | Spaces to always triage, grouped by priority tier (P1/P2/P3) |
-| **Mentions Only** | Large/noisy spaces — only included if you're @mentioned |
+| **Mentions Only** | Large/noisy spaces — only included if you're @mentioned or a watched thread has new replies |
 | **Never Scan** | Skip entirely (social, off-topic, personal) |
 | **Space-Specific Rules** | Per-space instructions in natural language |
 | **Noise Patterns to Ignore** | Global filters (bot messages, greetings, automated alerts) |
 
 Priority tiers control ordering in triage output — P1 spaces appear first, P3 last.
+
+### Watched threads
+
+When you post a reply in any thread, that thread is automatically added to a watch list (`.watched_threads.json`). For Mentions Only spaces, watched threads are checked for new replies even without an @mention — so if someone responds to a conversation you're part of, it surfaces in triage. Threads are pruned after 28 days of inactivity.
 
 You can also update preferences conversationally via the `update_preferences` MCP tool.
 

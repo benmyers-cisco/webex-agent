@@ -219,6 +219,28 @@ class WebexClient:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=within_hours)
         return created >= cutoff
 
+    def get_thread_messages(self, room_id: str, parent_id: str, after: Optional[datetime] = None, max_results: int = 50) -> list[dict]:
+        """Fetch messages in a specific thread (replies to parentId).
+
+        Args:
+            room_id: The space containing the thread
+            parent_id: The message ID of the thread parent
+            after: Only return messages after this time
+            max_results: Max messages to return
+        """
+        params = {"roomId": room_id, "parentId": parent_id, "max": min(max_results, 200)}
+        response = self.client.get("/messages", params=params)
+        response.raise_for_status()
+        messages = response.json().get("items", [])
+
+        if after:
+            after_utc = after.astimezone(timezone.utc)
+            messages = [
+                m for m in messages
+                if datetime.fromisoformat(m["created"].replace("Z", "+00:00")) >= after_utc
+            ]
+        return messages
+
     def send_message(self, room_id: str, text: str, markdown: str = "") -> dict:
         """Send a message to a space."""
         payload = {"roomId": room_id, "text": text}

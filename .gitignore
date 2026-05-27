@@ -3,6 +3,7 @@
 preferences.md
 .last_run
 .known_spaces.json
+.watched_threads.json
 knowledge.md
 decision-log.json
 __pycache__/

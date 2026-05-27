@@ -21,7 +21,9 @@ from oauth import get_valid_token
 
 LAST_RUN_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".last_run")
 KNOWN_SPACES_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".known_spaces.json")
+WATCHED_THREADS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".watched_threads.json")
 DEFAULT_LOOKBACK_H = 12
+WATCHED_THREAD_STALE_DAYS = 28
 
 
 def get_lookback_time() -> datetime:
@@ -65,6 +67,62 @@ def save_known_spaces(spaces: dict[str, str]):
     """Persist current set of known space IDs → titles."""
     with open(KNOWN_SPACES_FILE, "w") as f:
         json.dump(spaces, f, indent=2)
+
+
+def load_watched_threads() -> dict:
+    """Load watched threads. Structure: {parent_msg_id: {space_id, space_title, last_activity, added}}"""
+    if os.path.exists(WATCHED_THREADS_FILE):
+        try:
+            with open(WATCHED_THREADS_FILE) as f:
+                return json.load(f)
+        except (ValueError, OSError):
+            pass
+    return {}
+
+
+def save_watched_threads(threads: dict):
+    """Persist watched threads."""
+    with open(WATCHED_THREADS_FILE, "w") as f:
+        json.dump(threads, f, indent=2)
+
+
+def prune_watched_threads(threads: dict) -> dict:
+    """Remove threads with no activity in WATCHED_THREAD_STALE_DAYS days."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=WATCHED_THREAD_STALE_DAYS)).isoformat()
+    return {
+        tid: info for tid, info in threads.items()
+        if info.get("last_activity", "") >= cutoff
+    }
+
+
+def update_watched_threads_from_messages(messages: list[dict], user_email: str, space_id: str, space_title: str, watched: dict) -> dict:
+    """Scan messages for threaded replies by the user and add those threads to the watch list."""
+    for msg in messages:
+        parent_id = msg.get("parentId")
+        sender = msg.get("personEmail", "")
+        if parent_id and sender.lower() == user_email.lower():
+            # User posted in this thread — watch it
+            msg_time = msg.get("created", "")
+            if parent_id not in watched:
+                watched[parent_id] = {
+                    "space_id": space_id,
+                    "space_title": space_title,
+                    "last_activity": msg_time,
+                    "added": msg_time,
+                }
+            else:
+                # Update last_activity if this message is newer
+                if msg_time > watched[parent_id].get("last_activity", ""):
+                    watched[parent_id]["last_activity"] = msg_time
+    return watched
+
+
+def get_watched_thread_spaces(watched: dict, lookback: datetime) -> dict[str, list[str]]:
+    """Get space_id → [parent_ids] for watched threads that might have new activity."""
+    space_threads: dict[str, list[str]] = {}
+    for parent_id, info in watched.items():
+        space_threads.setdefault(info["space_id"], []).append(parent_id)
+    return space_threads
 
 
 def detect_new_spaces(relevant_spaces: list[dict], known: dict[str, str]) -> list[dict]:
@@ -298,19 +356,20 @@ def _parse_space_lists(preferences: str) -> tuple[set[str], set[str]]:
     return always_scan, never_scan
 
 
-def find_my_relevant_spaces(webex: WebexClient, lookback: datetime, max_spaces: int = 20) -> list[dict]:
+def find_my_relevant_spaces(webex: WebexClient, lookback: datetime, max_spaces: int = 20, watched_threads: dict = None) -> list[dict]:
     """Find relevant spaces using an optimized approach:
 
     1. Fetch room list (sorted by lastActivity) — single API call
     2. Filter client-side by lastActivity timestamp — zero API calls for stale spaces
     3. For active spaces:
        - DMs/group chats/Always Scan: include directly (activity confirmed by timestamp)
-       - Other channels: check mentionedPeople=me (1 API call each)
+       - Other channels: check mentionedPeople=me OR watched threads with new replies
     4. Also check for newly-created spaces (catches new DMs/groups)
     """
     preferences = load_preferences()
     always_scan, never_scan = _parse_space_lists(preferences)
     debug = os.environ.get("SUMMARY_DEBUG")
+    watched_space_threads = get_watched_thread_spaces(watched_threads or {}, lookback) if watched_threads else {}
     lookback_utc = lookback.astimezone(timezone.utc) if lookback.tzinfo else lookback.replace(tzinfo=timezone.utc)
 
     # Single API call to get spaces sorted by last activity
@@ -362,11 +421,15 @@ def find_my_relevant_spaces(webex: WebexClient, lookback: datetime, max_spaces: 
             if debug and title_lower in always_scan:
                 print(f"    [debug] always-scan '{title[:40]}' — has activity")
         else:
-            # Other channels: only include if @mentioned (single API call)
+            # Other channels: include if @mentioned OR if watched threads have new replies
             if _has_mentions_in_window(webex, space["id"], lookback_utc):
                 relevant_spaces.append(space)
+            elif _has_watched_thread_activity(webex, space["id"], lookback_utc, watched_space_threads, watched_threads):
+                relevant_spaces.append(space)
+                if debug:
+                    print(f"    [debug] channel '{title[:40]}' — watched thread activity")
             elif debug:
-                print(f"    [debug] channel '{title[:40]}' — no mentions")
+                print(f"    [debug] channel '{title[:40]}' — no mentions or thread activity")
 
         if len(relevant_spaces) >= max_spaces:
             break
@@ -389,6 +452,27 @@ def _has_mentions_in_window(webex: WebexClient, room_id: str, after_utc: datetim
         return False
     msg_time = datetime.fromisoformat(mentions[0]["created"].replace("Z", "+00:00"))
     return msg_time >= after_utc
+
+
+def _has_watched_thread_activity(webex: WebexClient, space_id: str, after_utc: datetime, watched_space_threads: dict, watched_threads: dict = None) -> bool:
+    """Check if any watched threads in this space have new messages since the lookback.
+    Also updates last_activity on watched_threads if new replies found."""
+    thread_ids = watched_space_threads.get(space_id, [])
+    if not thread_ids:
+        return False
+    for parent_id in thread_ids:
+        try:
+            replies = webex.get_thread_messages(space_id, parent_id, after=after_utc, max_results=1)
+            if replies:
+                # Update last_activity so the stale timer resets
+                if watched_threads and parent_id in watched_threads:
+                    reply_time = replies[0].get("created", "")
+                    if reply_time > watched_threads[parent_id].get("last_activity", ""):
+                        watched_threads[parent_id]["last_activity"] = reply_time
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def main():
@@ -416,8 +500,14 @@ def main():
     if not user_email:
         print("Warning: SUMMARY_USER_EMAIL not set and auto-detect failed. Triage directionality will be impaired.", file=sys.stderr)
 
+    # Load and prune watched threads
+    watched_threads = load_watched_threads()
+    watched_threads = prune_watched_threads(watched_threads)
+
     print(f"Looking back {lookback_hours}h (since {after.strftime('%Y-%m-%d %H:%M UTC')})...")
-    target_spaces = find_my_relevant_spaces(webex, lookback=after, max_spaces=20)
+    if watched_threads:
+        print(f"  Watching {len(watched_threads)} active thread(s).")
+    target_spaces = find_my_relevant_spaces(webex, lookback=after, max_spaces=20, watched_threads=watched_threads)
 
     if not target_spaces:
         print("No spaces with your recent activity found.")
@@ -453,6 +543,13 @@ def main():
         messages = webex.get_messages(space["id"], after=after, max_results=200)
         if not messages:
             continue
+
+        # Update watched threads: any threaded reply by the user gets tracked
+        if user_email:
+            watched_threads = update_watched_threads_from_messages(
+                messages, user_email, space["id"], space.get("title", ""), watched_threads
+            )
+
         print(f"  Analyzing '{space['title']}' ({len(messages)} messages)...")
         transcript = format_messages(messages, user_email)
         triage = triage_with_claude(claude, transcript, space["title"], user_email)
@@ -509,6 +606,7 @@ def main():
 
     if not any([blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts]) and not new_spaces:
         print("No actionable items found.")
+        save_watched_threads(watched_threads)
         save_run_timestamp()
         return
 
@@ -575,6 +673,8 @@ def main():
         print("No delivery target configured — printing to stdout:\n")
         print(full_summary)
 
+    # Persist watched threads (updated during message scanning)
+    save_watched_threads(watched_threads)
     save_run_timestamp()
 
 
