@@ -1,34 +1,7 @@
-# Webex Agent for Claude Code — Setup Guide
+# Webex Agent — Detailed Setup Guide
 
-> A Claude Code plugin that acts as your Webex chief of staff. It triages your messages, searches conversations, drafts responses, and runs automated daily briefings — so you spend less time scrolling Webex and more time on the work that matters.
-
----
-
-## What It Does
-
-### Triage & Briefings
-- **Smart triage**: Scans all your Webex spaces and categorizes what needs attention into four priority buckets:
-  1. **Blocked on You** — someone's waiting for your input
-  2. **Decisions Made Without You** — things decided that affect your work
-  3. **Opportunities to Add Value** — threads where your expertise could help
-  4. **FYI** — context only, no action needed
-- **Draft responses**: Generates ready-to-send replies for items that need your attention
-- **Automated daily briefings**: Cron-scheduled triage delivered to a Webex space or email (e.g., 8:30am and 4pm)
-- **Weekly retrospectives**: Extracts learnings from the week's conversations and builds a personal knowledge base
-
-### Search & Analysis
-- **Keyword search**: Find specific messages across all your spaces
-- **Topic search**: Semantic search — finds conversations by concept, not just exact words
-- **Deep analysis**: Ask questions about what's been discussed on a topic across spaces
-- **Transcript formatting**: Chronological, readable conversation threads
-
-### Communication
-- **Send messages**: Post to any Webex space directly from Claude
-- **Pre-meeting context**: Automatically pulls recent DM history with your meeting attendees before calls
-
-### Trainable Preferences
-- Teach it what matters to you — which spaces are high-priority, which topics to always flag, what to ignore
-- Learns over time through a `preferences.md` file you can edit or train conversationally
+> For the quick version, see [README.md](../README.md). This guide provides detailed
+> step-by-step instructions with screenshots-worth of context for each step.
 
 ---
 
@@ -36,8 +9,8 @@
 
 - **Claude Code** installed and working (with an Anthropic API key or AWS Bedrock access)
 - **Python 3.12+**
-- **A Cisco Webex account**
-- ~30 minutes for initial setup
+- **A Webex account** (Cisco enterprise or personal)
+- ~15 minutes for initial setup
 
 ---
 
@@ -58,7 +31,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Set up Webex authentication
+### 3. Run the setup wizard (recommended)
+
+```bash
+python scripts/setup.py
+```
+
+This walks you through everything interactively. If you prefer to do it manually, continue below.
+
+### 4. Set up Webex authentication (manual)
 
 You have two options. **OAuth is recommended** — personal tokens expire every 12 hours.
 
@@ -87,6 +68,10 @@ You have two options. **OAuth is recommended** — personal tokens expire every 
    ```
    This opens your browser for Webex login. After you authorize, tokens are saved to `.webex_token.json` and auto-refresh on each use.
 
+> **Enterprise orgs (Cisco):** Your Webex admin may need to approve the integration
+> before you can authorize. If the OAuth flow fails with a permissions error,
+> contact your Webex admin to whitelist the integration's client ID.
+
 #### Option B: Personal Access Token (Quick & Dirty)
 
 1. Go to [developer.webex.com/docs/getting-started](https://developer.webex.com/docs/getting-started)
@@ -95,7 +80,7 @@ You have two options. **OAuth is recommended** — personal tokens expire every 
 
 > **Warning**: Personal tokens expire after 12 hours. You'll need to re-copy it daily. OAuth is better for anything beyond a quick test.
 
-### 4. Configure your environment
+### 5. Configure your environment
 
 Copy the example env file and fill it in:
 
@@ -124,24 +109,32 @@ CLAUDE_CODE_USE_BEDROCK=true              # Use AWS Bedrock instead
 AWS_PROFILE=your_aws_profile
 ```
 
-### 5. Register as a Claude Code plugin
+### 6. Register as a Claude Code plugin
 
-From the webex-agent directory:
+The project includes a `.mcp.json` that auto-configures the MCP server. Add the project directory to your Claude Code settings as a project directory, or copy `.mcp.json` into your own project's root.
 
-The project includes a `.mcp.json` that auto-configures the MCP server. To use it, add the project directory to your Claude Code settings as a project directory, or copy `.mcp.json` into your own project's root.
+### 7. Run onboarding
 
-### 6. Test it
+Open Claude Code in the webex-agent directory and run:
 
-Open Claude Code and try:
+```
+/webex-onboard
+```
+
+This interactive skill walks you through configuring your role, classifying your spaces, and running your first calibration triage (~5-10 min).
+
+### 8. Test it
+
+Try:
 
 ```
 What needs my attention in Webex?
 ```
 
-Or search for something specific:
+Or run an on-demand triage:
 
 ```
-Search Webex for discussions about the API migration in the last 7 days
+/webex-triage
 ```
 
 ---
@@ -175,33 +168,20 @@ The `scripts/check_upcoming_meetings.py` script can run at Claude Code startup t
 
 ## Training Your Preferences
 
-The agent uses `preferences.md` to learn what matters to you. You can edit it directly or train it conversationally:
+The agent uses `preferences.md` to learn what matters to you. The easiest way to
+set this up is via `/webex-onboard`, which walks you through space classification
+interactively.
+
+You can also edit `preferences.md` directly or train it conversationally:
 
 ```
-Hey, always flag messages about security incidents.
-Ignore general chatter in the All-Hands space unless I'm mentioned.
-The Project Alpha space is high priority — always include it.
+Add proj-alpha to Always Scan P1.
+Move help-sre to Mentions Only.
+Never scan the Home Owners space.
 ```
 
-The preferences file looks like this:
-
-```markdown
-## My Role & Focus
-- Jane Smith (jsmith@cisco.com), PM on the Platform team
-
-## Always Relevant
-- API breaking changes
-- Security incidents
-- Mentions of Project Alpha
-
-## Never Relevant
-- General help desk chatter unless mentioned by name
-- Social/watercooler spaces
-
-## Space-Specific Rules
-- In All-Hands: only flag if directly mentioned
-- In Platform-Eng: always include (my team)
-```
+See `preferences.example.md` for the full template with priority tiers, space-specific
+rules, and noise pattern filters.
 
 ---
 
@@ -254,24 +234,7 @@ This keeps briefings focused. You won't get noise from 200-person channels unles
 
 ## Project Structure
 
-```
-webex-agent/
-├── servers/webex_mcp.py        # MCP server (9 tools exposed to Claude)
-├── servers/oauth.py            # OAuth2 flow + token refresh
-├── webex_client.py             # Webex API HTTP client
-├── agents/webex-analyst.md     # Agent definition
-├── scripts/
-│   ├── daily_summary.py        # Automated daily triage
-│   ├── weekly_retro.py         # Weekly learning extraction
-│   └── check_upcoming_meetings.py  # Pre-meeting context
-├── skills/
-│   ├── webex-triage.md         # Portable triage skill
-│   └── weekly-retrospective/   # Insight extraction methodology
-├── preferences.md              # Your trainable triage rules
-├── knowledge.md                # Extracted learnings
-├── .env.example                # Environment template
-└── requirements.txt            # Python dependencies
-```
+See the [README](../README.md#project-structure) for the full project layout.
 
 ---
 
