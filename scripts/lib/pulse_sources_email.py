@@ -176,9 +176,17 @@ def to_candidate(msg: dict, disposition: str, prefs=None) -> dict:
 
 
 def _run_msgraph(args: list[str]) -> str:
-    return subprocess.run(
-        [MSGRAPH, *args], capture_output=True, text=True, timeout=TIMEOUT_S, check=True
-    ).stdout
+    try:
+        return subprocess.run(
+            [MSGRAPH, *args], capture_output=True, text=True, timeout=TIMEOUT_S, check=True
+        ).stdout
+    except subprocess.CalledProcessError as exc:
+        try:
+            reason = json.loads(exc.stdout or "").get("error")
+        except (ValueError, AttributeError):
+            reason = None
+        reason = reason or (exc.stdout or "").strip() or (exc.stderr or "").strip() or str(exc)
+        raise RuntimeError(reason) from exc
 
 
 def collect(since_iso: str, prefs, my_email: str, runner=_run_msgraph) -> tuple[list[dict], str]:

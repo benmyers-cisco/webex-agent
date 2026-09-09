@@ -1,6 +1,7 @@
 import json
 import subprocess
 
+from lib import pulse_sources_email as email_mod
 from lib.pulse_prefs import parse_prefs
 from lib.pulse_sources_email import (
     AUTOMATED_SENDERS,
@@ -220,6 +221,21 @@ def test_collect_reports_is_watchlist_true_for_a_watchlisted_sender():
     assert status == "ok"
     assert len(candidates) == 1
     assert candidates[0]["is_watchlist"] is True
+
+
+def test_collect_surfaces_the_msgraph_cli_error_reason_not_just_exit_status(monkeypatch):
+    def fake_subprocess_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(
+            returncode=1, cmd=["msgraph"], output='{"error": "token expired"}'
+        )
+
+    monkeypatch.setattr(email_mod.subprocess, "run", fake_subprocess_run)
+    candidates, status = collect(
+        "2026-09-09T12:30:00+00:00", PREFS, ME, runner=email_mod._run_msgraph
+    )
+    assert candidates == []
+    assert status.startswith("degraded:")
+    assert "token expired" in status
 
 
 def test_collect_reports_is_watchlist_false_for_a_non_watchlisted_sender():
