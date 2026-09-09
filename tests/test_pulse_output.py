@@ -163,6 +163,33 @@ def test_a_failed_write_leaves_the_previous_artifact_intact(tmp_path, monkeypatc
     assert surviving["day"] == "2026-09-08"
 
 
+# --- F12: two overlapping runs must not share one temp name ----------------
+#
+# StartCalendarInterval deliberately permits overlapping runs and nothing bounds
+# a run's duration — there is no timeout on the Bedrock call or the Webex HTTP
+# calls. Two concurrent writers truncating the same "pulse.json.tmp" can
+# os.replace mixed bytes into place. Ruling 79 gave the *wrapper* a distinct temp
+# name for exactly this reason; python-vs-python was left exposed.
+
+
+def test_the_payload_temp_name_is_distinct_per_process(tmp_path, monkeypatch):
+    captured = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        captured.append(src)
+        real_replace(src, dst)
+
+    monkeypatch.setattr("lib.pulse_output.os.replace", spy)
+    write_payload(build_payload([], {"webex": "ok"}, NOW, NOW, NOW, notified=False),
+                  str(tmp_path))
+
+    assert len(captured) == 1
+    name = os.path.basename(captured[0])
+    assert name != "pulse.json.tmp", "a shared temp name is the collision"
+    assert str(os.getpid()) in name
+
+
 def test_a_successful_write_leaves_no_tmp_file_behind(tmp_path):
     out = str(tmp_path)
     write_payload(build_payload([], {"webex": "ok"}, NOW, NOW, NOW, notified=False), out)

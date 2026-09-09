@@ -143,3 +143,31 @@ def test_save_then_load_round_trips(tmp_path):
     path = str(tmp_path / "seen.json")
     save_state(path, {"day": "2026-09-09", "seen": {"a": {"tier": "panel"}}})
     assert load_state(path, "2026-09-09")["seen"]["a"]["tier"] == "panel"
+
+
+# --- F12: the seen store's temp name must be per-process too ----------------
+
+
+def test_the_state_temp_name_is_distinct_per_process(tmp_path, monkeypatch):
+    """Overlapping runs are permitted by StartCalendarInterval and unbounded in
+    duration, so a shared ".tmp" is a real collision. Corruption here is already
+    handled by load_state's warn-and-treat-as-empty (which re-notifies — the safe
+    direction), but the case is removable rather than merely survivable.
+    """
+    import os
+
+    path = str(tmp_path / "seen.json")
+    captured = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        captured.append(src)
+        real_replace(src, dst)
+
+    monkeypatch.setattr("lib.pulse_state.os.replace", spy)
+    save_state(path, {"day": "2026-09-09", "seen": {}})
+
+    assert len(captured) == 1
+    name = os.path.basename(captured[0])
+    assert name != "seen.json.tmp", "a shared temp name is the collision"
+    assert str(os.getpid()) in name

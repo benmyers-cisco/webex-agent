@@ -96,7 +96,12 @@ def load_state(path: str, today: str) -> dict:
 
 
 def save_state(path: str, state: dict) -> None:
-    tmp = f"{path}.tmp"
+    # Per-process for the same reason write_payload's is: overlapping runs are
+    # permitted and unbounded, and a shared temp name lets one writer os.replace
+    # another's half-written bytes into place. Corruption here is already survived
+    # by load_state's warn-and-treat-as-empty (which re-notifies — the safe
+    # direction), but the case is removable rather than merely survivable.
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as fh:
         json.dump(state, fh, indent=2)
     os.replace(tmp, path)

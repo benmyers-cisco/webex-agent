@@ -134,7 +134,14 @@ def failure_payload(reason: str, now_iso: str, day=None) -> dict:
 def write_payload(payload: dict, output_dir: str) -> str:
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, ARTIFACT)
-    tmp = f"{path}.tmp"
+    # Per-process, because StartCalendarInterval deliberately permits overlapping
+    # runs and nothing bounds a run's duration — no timeout on the Bedrock call
+    # in pulse_classify, none on the Webex HTTP calls, and the plist's TimeOut
+    # key does not kill a calendar-interval job. Two concurrent writers
+    # truncating one shared "pulse.json.tmp" can os.replace mixed bytes into
+    # place. Ruling 79 gave the wrapper a distinct temp name for this reason;
+    # this closes the python-vs-python half.
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as fh:
         json.dump(payload, fh, indent=2)
     os.replace(tmp, path)

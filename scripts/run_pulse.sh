@@ -37,17 +37,19 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/opt/python@3.12/bin:/usr/local/bin:
 #    day's run archive_if_new_day would see day != today and move it aside —
 #    "misfile" undersold it; the UTC version gets deleted from the live path.
 #  - Renders to pulse.json.WRAPPER-TMP (a name distinct from the
-#    pulse.json.tmp that pulse_output.write_payload itself uses) and mv's into
-#    place only once python exits 0, rather than redirecting python's stdout
+#    pulse.json.<pid>.tmp that pulse_output.write_payload itself uses) and mv's
+#    into place only once python exits 0, rather than redirecting python's stdout
 #    straight at pulse.json. A plain `> pulse.json` truncates the target the
 #    instant the shell opens it, before python runs at all — so if python
 #    itself fails to import or write, the artifact left behind is a destroyed,
 #    zero-byte file instead of whatever was there before. The distinct name
 #    also matters on its own: StartCalendarInterval deliberately permits
-#    overlapping runs, so two wrapper invocations (or a wrapper invocation
-#    racing hourly_pulse.py's own write) sharing "pulse.json.tmp" could
-#    collide, with one os.replace-ing the other's half-written render into
-#    place.
+#    overlapping runs, so a wrapper invocation racing hourly_pulse.py's own
+#    write could collide, with one os.replace-ing the other's half-written
+#    render into place. write_payload's temp name now carries its pid for the
+#    python-vs-python half of the same race (finding F12). Two overlapping
+#    WRAPPER invocations still share this one name; that is a narrower case —
+#    both are rendering the same failure_payload shape — and is left as is.
 #  - If the render itself cannot be produced — the interpreter runs but the
 #    import fails, e.g. a broken lib/pulse_state.py, which pulse_output.py
 #    imports and which is exactly the kind of bug that also makes
