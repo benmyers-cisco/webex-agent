@@ -4,9 +4,15 @@ preferences.md
 .last_run
 .known_spaces.json
 .watched_threads.json
+.pending_spaces.json
 knowledge.md
 decision-log.json
 __pycache__/
 *.pyc
 .venv/
 output/
+.pytest_cache/
+__pycache__/
+.last_pulse_run
+.pulse_seen.json
+output/pulse*.json
