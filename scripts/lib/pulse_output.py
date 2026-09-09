@@ -6,6 +6,11 @@ Two invariants:
    actual messages rather than a model's summary of them.
 2. A failed run still writes an artifact. An empty items list and a failed run
    look identical otherwise, and the failed run would then read as a quiet hour.
+3. `notified` is history, never a prediction. It is true only when a banner has
+   actually fired for the item on some earlier run. build_items runs before the
+   notification is attempted, so it cannot know the outcome and must not guess
+   — a brand-new priority item reads False here, and the orchestrator sets it
+   true afterwards only if the banner really fired.
 
 A third invariant lives specifically in build_items: it must never silently
 drop a candidate. If the classifier returns fewer verdicts than candidates
@@ -70,7 +75,14 @@ def build_items(candidates, verdicts, state, now_iso) -> list[dict]:
             "draft_reply": verdict.get("draft_reply"),
             "link": candidate.get("link"),
             "first_seen": prior.get("first_seen", now_iso),
-            "notified": bool(prior.get("notified")) or tier == "priority",
+            # Strictly historical: a banner has ACTUALLY fired for this item.
+            # It must never be inferred from `tier == "priority"`, because
+            # build_items runs BEFORE notify — so that inference would claim an
+            # interruption that has not been attempted yet, and would still
+            # claim it on a run where the banner failed. Silence reading as
+            # success is the one thing this whole design exists to prevent, and
+            # this field is what the Hub renders to Ben.
+            "notified": bool(prior.get("notified")),
             "resolved": bool(prior.get("resolved")),
         }
 

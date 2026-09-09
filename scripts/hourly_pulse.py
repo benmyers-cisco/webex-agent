@@ -23,6 +23,11 @@ Three failure rules shape the code below:
    bounds how far the window can regrow, so there is no runaway.
 3. Omission must never escalate. Every default, pad, and fallback lands on the
    non-interrupting `panel` tier.
+4. `notified` records what actually happened, never what was expected to. It
+   becomes true only when a banner really fired, which is why a priority item
+   stays eligible for a retry until one does — an urgent message whose banner
+   hit a permission dialog or a timeout would otherwise never interrupt Ben at
+   all. The local day boundary resets the store and is the retry bound.
 """
 from __future__ import annotations
 
@@ -111,11 +116,20 @@ def _run(deps: dict, now, now_iso: str, local_now, today: str) -> dict:
     if any(item.get("classification_failed") for item in items):
         sources["classifier"] = CLASSIFIER_DEGRADED
 
-    # Only items not already in the seen store can fire a notification. An
-    # unanswered ask from 09:15 must not re-fire every hour.
+    # A priority item is eligible for a banner until one has actually fired for
+    # it. `notified` is history, not "have we seen this before", so an
+    # unanswered ask from 09:15 still does not re-fire every hour — it was
+    # notified, so it is not eligible. What DOES re-fire is an item whose banner
+    # failed: a TCC permission dialog, an osascript timeout. That is transient
+    # failure, which is exactly what a retry is for, and the alternative is an
+    # urgent message that never interrupts Ben at all.
+    #
+    # No retry cap, deliberately: load_state resets the seen store at the local
+    # day boundary, so the worst case is bounded at one workday of attempts,
+    # each already bounded by pulse_notify's own subprocess timeout.
     fresh_priority = [
         item for item in items
-        if item["tier"] == "priority" and item["id"] not in state["seen"]
+        if item["tier"] == "priority" and not item["notified"]
     ]
     # Captured BEFORE the loop below mutates state["seen"]: testing against a
     # set you are still building answers the wrong question.
@@ -126,13 +140,22 @@ def _run(deps: dict, now, now_iso: str, local_now, today: str) -> dict:
     notified = deps["notify"](fresh_priority)
 
     for item in items:
+        # Read it plainly: it stays notified if it already was, and becomes
+        # notified if the banner fired this run and this item was in that
+        # banner. Both halves are load-bearing — drop the first and a quiet run
+        # forgets the interruption already delivered; drop the second and the
+        # banner's success is never recorded, so Ben gets interrupted again next
+        # hour about the same message.
+        #
+        # Folded back onto the item, not just into the store, because
+        # build_items necessarily ran before the banner was attempted and the
+        # artifact is written after it. The Hub reads the artifact: an item Ben
+        # was just interrupted about must not read as un-notified there, and the
+        # artifact must not disagree with the store the next run loads.
+        item["notified"] = item["notified"] or (notified and item["id"] in fresh_ids)
         state["seen"][item["id"]] = {
             "first_seen": item["first_seen"],
-            # Sticky. An item notified on an earlier run stays notified even
-            # though this run stayed silent about it; a fresh item is only
-            # recorded as notified if the banner actually fired, so a failed
-            # notification is retried next run instead of going silent forever.
-            "notified": item["notified"] and (notified or item["id"] not in fresh_ids),
+            "notified": item["notified"],
             "resolved": item["resolved"],
             "tier": item["tier"],
         }

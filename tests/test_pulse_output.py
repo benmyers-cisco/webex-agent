@@ -38,15 +38,42 @@ def test_item_shape_matches_the_contract():
     assert item["from"] == {"name": "Rory Scott", "email": "rorscott@cisco.com"}
 
 
-def test_a_new_priority_item_is_marked_notified():
+def test_a_brand_new_priority_item_is_not_yet_marked_notified():
+    """`notified` is history, not a prediction.
+
+    build_items runs BEFORE the notification is attempted, so inferring
+    notified from `tier == "priority"` would claim an interruption that has not
+    happened — and would keep claiming it on a run where the banner failed.
+    The orchestrator sets this true afterwards, only if a banner really fired.
+    """
     items = build_items(CANDIDATES, VERDICTS, {"day": "2026-09-09", "seen": {}}, NOW)
-    assert items[0]["notified"] is True
+    assert items[0]["tier"] == "priority"
+    assert items[0]["notified"] is False
     assert items[0]["first_seen"] == NOW
 
 
 def test_a_panel_item_is_never_marked_notified():
     verdicts = [{"tier": "panel", "trigger": "p1_channel", "why": "FYI", "draft_reply": None}]
     items = build_items(CANDIDATES, verdicts, {"day": "2026-09-09", "seen": {}}, NOW)
+    assert items[0]["notified"] is False
+
+
+def test_a_priority_item_notified_on_an_earlier_run_stays_notified():
+    from lib.pulse_state import fingerprint
+    fid = fingerprint(CANDIDATES[0])
+    state = {"day": "2026-09-09", "seen": {fid: {"first_seen": "earlier", "notified": True}}}
+    items = build_items(CANDIDATES, VERDICTS, state, NOW)
+    assert items[0]["notified"] is True
+
+
+def test_a_prior_entry_that_was_never_notified_stays_not_notified():
+    """The failed-banner case: the prior run recorded notified=False, and
+    build_items must not upgrade it just because the tier is priority.
+    """
+    from lib.pulse_state import fingerprint
+    fid = fingerprint(CANDIDATES[0])
+    state = {"day": "2026-09-09", "seen": {fid: {"first_seen": "earlier", "notified": False}}}
+    items = build_items(CANDIDATES, VERDICTS, state, NOW)
     assert items[0]["notified"] is False
 
 

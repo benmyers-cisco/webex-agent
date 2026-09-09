@@ -269,27 +269,75 @@ def test_an_item_notified_on_run_one_still_reads_notified_on_run_three(tmp_path)
     assert third["items"][0]["notified"] is True
 
 
-def test_a_failed_banner_is_recorded_as_not_notified_and_never_re_fires(tmp_path):
-    """notify() returning False means no banner fired, so the store must not
-    claim one did — that is the other half of ruling 32's `and notified`.
-
-    It is deliberately NOT retried: freshness is "not yet in the seen store",
-    and pulse_notify's own docstring names the alternative as the hazard — a
-    permanently broken osascript would otherwise re-fire the same item every
-    hour forever. An item that failed to interrupt still reaches Ben on the
-    panel and in the next briefing.
+def test_a_priority_item_whose_banner_failed_is_retried_on_the_next_run(tmp_path):
+    """The gap: without this, an urgent message whose banner hit a TCC dialog or
+    a timeout never interrupts Ben at all. Transient failure is what a retry is
+    for. Paired with the test below, which pins the opposite guarantee.
     """
-    run(_deps(tmp_path, notify=lambda items: False))
+    first = run(_deps(tmp_path, notify=lambda items: False))
+    assert first["notified_this_run"] is False
 
     state = json.load(open(tmp_path / ".pulse_seen.json"))
     assert state["seen"]
     assert all(entry["notified"] is False for entry in state["seen"].values())
 
     calls = []
-    second = run(_deps(tmp_path, notify=lambda items: calls.append(items) or bool(items)))
+
+    def counting_notify(items):
+        calls.append(list(items))
+        return bool(items)
+
+    second = run(_deps(tmp_path, notify=counting_notify))
+    assert second["notified_this_run"] is True
+    assert len(calls) == 1
+    assert [item["text"] for item in calls[0]] == ["Confirm before the pre-read?"]
+
+
+def test_a_priority_item_whose_banner_succeeded_is_not_retried_on_the_next_run(tmp_path):
+    """The regression the sticky flag exists to prevent: Ben must not be
+    interrupted twice about the same message.
+    """
+    first = run(_deps(tmp_path))
+    assert first["notified_this_run"] is True
+
+    calls = []
+
+    def counting_notify(items):
+        calls.append(list(items))
+        return bool(items)
+
+    second = run(_deps(tmp_path, notify=counting_notify))
     assert second["notified_this_run"] is False
     assert calls == [[]]
-    assert second["items"][0]["tier"] == "priority"  # still shown
+    assert second["items"][0]["tier"] == "priority"  # still shown, just silent
+
+
+def test_the_artifact_never_claims_a_banner_fired_when_it_failed(tmp_path):
+    """Assert against the file, not the return value: the artifact is what the
+    Hub renders to Ben, and a false `notified: true` there is this design's
+    central inversion — silence reading as success — reaching the user.
+    """
+    run(_deps(tmp_path, notify=lambda items: False))
+
+    on_disk = json.load(open(tmp_path / "output" / "pulse.json"))
+    assert on_disk["items"][0]["tier"] == "priority"
+    assert on_disk["items"][0]["notified"] is False
+    assert on_disk["notified_this_run"] is False
+
+
+def test_the_artifact_records_the_banner_that_did_fire(tmp_path):
+    """The mirror: build_items necessarily ran before the banner was attempted,
+    so the artifact must carry the outcome rather than the guess it was built
+    with — and must agree with the store the next run loads.
+    """
+    run(_deps(tmp_path))
+
+    on_disk = json.load(open(tmp_path / "output" / "pulse.json"))
+    assert on_disk["items"][0]["notified"] is True
+
+    state = json.load(open(tmp_path / ".pulse_seen.json"))
+    stored = state["seen"][on_disk["items"][0]["id"]]
+    assert stored["notified"] is True
 
 
 # --- Ruling 58: a degraded classifier surfaces through sources -------------
