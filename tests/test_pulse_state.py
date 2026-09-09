@@ -55,9 +55,40 @@ def test_first_run_of_the_day_floors_to_0830_local():
     assert got == datetime(2026, 9, 9, 12, 30, tzinfo=UTC)  # 08:30 ET
 
 
-def test_missing_last_run_falls_back_to_one_hour_but_never_before_the_floor():
-    now = datetime(2026, 9, 9, 18, 15, tzinfo=UTC)
+def test_missing_last_run_falls_back_to_one_hour_when_the_floor_is_not_binding():
+    now = datetime(2026, 9, 9, 18, 15, tzinfo=UTC)  # 14:15 ET, hours past 08:30
     assert pulse_window(None, now, tz_offset_hours=-4) == now - timedelta(hours=1)
+
+
+# --- F13: the fallback paths must honour the 08:30 floor too ----------------
+#
+# Both fallbacks returned `now - 1h` and never consulted the floor computed
+# three lines earlier. At the 09:15 first run that reaches back to 08:15, inside
+# the 08:30 briefing's territory the floor exists to protect — and those messages
+# are eligible for a PRIORITY banner, so Ben gets interrupted about something the
+# morning briefing already handed him. That is the complaint this project exists
+# to fix, arriving through the fallback.
+
+
+def test_a_missing_last_run_on_the_first_run_of_the_day_still_floors_to_0830():
+    now = datetime(2026, 9, 9, 13, 15, tzinfo=UTC)  # 09:15 ET
+    got = pulse_window(None, now, tz_offset_hours=-4)
+    assert got == datetime(2026, 9, 9, 12, 30, tzinfo=UTC)  # 08:30 ET, not 08:15
+
+
+def test_an_unparseable_last_run_on_the_first_run_of_the_day_still_floors_to_0830():
+    now = datetime(2026, 9, 9, 13, 15, tzinfo=UTC)  # 09:15 ET
+    got = pulse_window("not a timestamp", now, tz_offset_hours=-4)
+    assert got == datetime(2026, 9, 9, 12, 30, tzinfo=UTC)
+
+
+def test_an_unparseable_last_run_later_in_the_day_still_only_reaches_back_an_hour():
+    """The floor is a floor, not a replacement: it must not widen the window to
+    the whole day once the fallback consults it.
+    """
+    now = datetime(2026, 9, 9, 18, 15, tzinfo=UTC)  # 14:15 ET
+    assert pulse_window("", now, tz_offset_hours=-4) == now - timedelta(hours=1)
+    assert pulse_window("nonsense", now, tz_offset_hours=-4) == now - timedelta(hours=1)
 
 
 def test_next_briefing_is_todays_4pm_before_1600_local():

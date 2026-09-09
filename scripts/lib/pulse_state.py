@@ -41,13 +41,21 @@ def pulse_window(last_run_iso: str | None, now: datetime, tz_offset_hours: float
     )
     floor_utc = floor_local - offset
 
+    # Both fallbacks are floored, not just the last-run path. Without the floor,
+    # a missing or unparseable watermark at the 09:15 run reaches back to 08:15 —
+    # inside the 08:30 briefing's territory this floor exists to protect. The
+    # consequence is not merely duplication: those messages are eligible for a
+    # priority banner, so Ben would be interrupted about something the morning
+    # briefing already handed him.
+    fallback = now - timedelta(hours=FALLBACK_LOOKBACK_H)
+
     if not last_run_iso:
-        return now - timedelta(hours=FALLBACK_LOOKBACK_H)
+        return max(fallback, floor_utc)
 
     try:
         last = datetime.fromisoformat(last_run_iso)
     except (TypeError, ValueError):
-        return now - timedelta(hours=FALLBACK_LOOKBACK_H)
+        return max(fallback, floor_utc)
 
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
