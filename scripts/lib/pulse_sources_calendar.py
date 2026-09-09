@@ -71,11 +71,17 @@ def imminent_meetings(events: list[dict], now: datetime, lookahead_hours: int) -
     at the lookahead boundary is left for the next cycle rather than fired
     early — the quieter answer at both edges.
 
-    One unparseable event never discards the good events beside it.
+    One unparseable event never discards the good events beside it. This
+    function owns per-event resilience on its own — a non-dict element is
+    skipped, not just an event with a missing or unparseable `start` —
+    because a caller (including Task 11, which may call this directly) is
+    not guaranteed to have pre-validated the list.
     """
     horizon = now + timedelta(hours=lookahead_hours)
     out = []
     for event in events or []:
+        if not isinstance(event, dict):
+            continue
         start = _parse_start(event.get("start"))
         if start is None:
             continue
@@ -132,4 +138,13 @@ def collect(now: datetime, runner=_run_msgraph) -> tuple[list[dict], str]:
     if not isinstance(events, list):
         return [], "degraded: unparseable calendar output (events is not a list)"
 
-    return imminent_meetings(events, now, LOOKAHEAD_HOURS), "ok"
+    # The container can be a well-formed list while an individual element is
+    # still hostile (a bare int, or a `start` that trips a comparison
+    # between naive and aware datetimes). imminent_meetings already skips
+    # what it can, but nothing here may be allowed to propagate — this call
+    # has to stay inside the guarded region so any surprise still comes
+    # back as "degraded: <reason>" instead of raising out of collect.
+    try:
+        return imminent_meetings(events, now, LOOKAHEAD_HOURS), "ok"
+    except Exception as exc:  # noqa: BLE001 — any failure degrades, none propagates
+        return [], f"degraded: {exc}"

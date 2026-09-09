@@ -191,3 +191,29 @@ def test_collect_surfaces_the_msgraph_cli_error_reason_not_just_exit_status(monk
 
 def test_lookahead_hours_constant_is_two():
     assert LOOKAHEAD_HOURS == 2
+
+
+# --- Bug fix round 1: a non-dict element must not raise, in
+# imminent_meetings directly or via collect, and one bad element must not
+# take the good ones down with it. ---
+
+
+def test_imminent_meetings_skips_a_non_dict_element_directly():
+    events = [1, _event("Good", "2026-09-09T19:00:00+00:00")]
+    assert [m["subject"] for m in imminent_meetings(events, NOW, 2)] == ["Good"]
+
+
+def test_collect_does_not_raise_when_events_are_all_wrong_shape():
+    # All elements are unusable, so there are no meetings — but that must
+    # come back as a normal "ok" empty result, never a raised exception.
+    payload = json.dumps({"events": [1, 2, 3]})
+    meetings, status = collect(NOW, runner=lambda _a: payload)
+    assert meetings == []
+    assert status == "ok"
+
+
+def test_collect_returns_the_good_meeting_from_a_mixed_batch_not_empty():
+    payload = json.dumps({"events": [1, _event("Good", "2026-09-09T19:00:00+00:00")]})
+    meetings, status = collect(NOW, runner=lambda _a: payload)
+    assert status == "ok"
+    assert [m["subject"] for m in meetings] == ["Good"]
