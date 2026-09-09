@@ -87,12 +87,36 @@ def test_the_mentions_only_section_is_parsed_as_its_own_tier():
     assert prefs.mentions == {"duo pm sync"}
 
 
-def test_never_scan_stays_unlisted_because_that_is_what_it_means():
-    """Never Scan is deliberately NOT a tier: "unlisted" already means "do not
-    fetch", so parsing it would only create a second name for one behaviour.
+def test_never_scan_is_its_own_tier_now_that_unlisted_no_longer_means_unfetched():
+    """This test asserted the opposite until group chats became unconditionally
+    eligible, and the reversal is the point.
+
+    The original reasoning was sound: "unlisted" already meant "do not fetch", so
+    parsing Never Scan would give one behaviour two names. Making group chats
+    eligible on a title heuristic broke that equivalence — an unlisted space
+    whose title looks like a list of people is now fetched and escalated to P1.
+    So the explicit exclusion has to be readable, or the only way to say "not
+    this one" is a setting the code cannot see.
     """
     prefs = parse_prefs(PREFS)
-    assert prefs.tier_of("Social / watercooler channels") == "unlisted"
+    assert prefs.tier_of("Social / watercooler channels") == "never"
+    assert prefs.tier_of("Some channel in no list at all") == "unlisted"
+
+
+def test_never_scan_outranks_a_contradictory_p1_listing():
+    """A title in both lists is a contradiction, and the quieter reading is the
+    safe one: wrongly staying silent is visible to Ben the moment he looks at the
+    panel, while wrongly interrupting him is the failure this project exists to
+    remove.
+    """
+    prefs = parse_prefs("""
+### Priority 1 — Interrupt Me
+- C3 + CUI
+
+## Never Scan
+- C3 + CUI
+""")
+    assert prefs.tier_of("C3 + CUI") == "never"
 
 
 def test_a_channel_listed_twice_takes_the_louder_tier():

@@ -453,3 +453,64 @@ def test_collect_uses_watched_space_threads_for_unlisted_space():
     assert len(out) == 1
     assert out[0]["is_watched_thread"] is True
     assert out[0]["tier_hint"] == "p2"
+
+
+def test_a_tagged_thread_reply_survives_the_mentions_only_filter():
+    """Demoting a space to `## Mentions Only` must not cost coverage Ben already
+    had by leaving it unlisted.
+
+    An unlisted space with a thread he's been tagged in is eligible at p2, and
+    the tagged-thread trigger is one of the two ways a p2 space can notify. Since
+    the mentions filter only kept @mentions and watchlist senders, moving that
+    same space into Mentions Only made the tagged-thread path unreachable — a
+    demotion that *narrowed* coverage instead of narrowing noise. The spec's tier
+    table says mentions survivors are judged as P2, and P2 includes tagged
+    threads, so the filter has to admit them for the table to be true.
+    """
+    spaces = [{"title": "Duo PM Sync", "type": "group", "id": "m"}]
+    reply = _msg("noisy@cisco.com", "picking this back up")
+    reply["parentId"] = "thread-ben-is-in"
+    messages = {"m": [_msg("noisy@cisco.com", "unrelated chatter"), reply]}
+    webex = FakeWebexClient(spaces, messages)
+    out, status = collect(
+        webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {"m": ["thread-ben-is-in"]}
+    )
+    assert [c["text"] for c in out] == ["picking this back up"]
+    assert out[0]["is_watched_thread"] is True
+    assert out[0]["tier_hint"] == "p2"
+    assert status == "ok"
+
+
+def test_a_reply_in_a_thread_ben_is_not_in_does_not_survive_the_mentions_filter():
+    """The other half: `is_watched_thread` is membership, not "is a reply". If
+    any threaded reply passed, a mentions-only space would leak every
+    conversation in it — the exact noise the demotion exists to stop.
+    """
+    spaces = [{"title": "Duo PM Sync", "type": "group", "id": "m"}]
+    reply = _msg("noisy@cisco.com", "replying to someone else")
+    reply["parentId"] = "thread-ben-is-not-in"
+    webex = FakeWebexClient(spaces, {"m": [reply]})
+    out, status = collect(
+        webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {"m": ["thread-ben-is-in"]}
+    )
+    assert out == []
+    assert status == "ok"
+
+
+def test_an_explicit_never_scan_listing_beats_the_group_chat_heuristic():
+    """`## Never Scan` is Ben saying "not this one", and a title heuristic must
+    not overrule it.
+
+    `is_group_chat` is a guess from the title — Webex ad-hoc rooms are typed
+    "group" and titled with participant names, so a room legitimately named like
+    people trips it. Evaluating it before `tier_of` meant an explicitly excluded
+    space could be fetched and escalated to P1, which is the loudest possible way
+    to ignore an instruction. Never Scan is checked first now.
+    """
+    prefs = parse_prefs("""
+## Never Scan
+- Sam Betlej, Adam Greer
+""")
+    space = {"title": "Sam Betlej, Adam Greer", "type": "group", "id": "n"}
+    ok, tier = space_is_eligible(space, prefs, {})
+    assert (ok, tier) == (False, "never")

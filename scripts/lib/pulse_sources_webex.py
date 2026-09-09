@@ -69,10 +69,21 @@ def space_is_eligible(space: dict, prefs, watched_space_threads: dict) -> tuple[
     entry in preferences.md — which is why the migration was right to delete the
     one it found, and wrong about the pulse honouring it.
     """
+    tier = prefs.tier_of(space.get("title", ""))
+
+    # Never Scan is checked before anything else, including the group-chat
+    # heuristic. That heuristic is a guess from the title — ad-hoc Webex rooms
+    # are typed "group" and titled with participant names, so a room genuinely
+    # named after people trips it. Letting it run first meant a space Ben had
+    # explicitly excluded could be fetched AND escalated to P1: the loudest
+    # possible way to ignore an instruction. An explicit listing wins over a
+    # heuristic every time.
+    if tier == "never":
+        return False, "never"
+
     if space.get("type") == "direct" or is_group_chat(space):
         return True, "dm"
 
-    tier = prefs.tier_of(space.get("title", ""))
     if tier in ("p1", "p2", MENTIONS_TIER):
         # MENTIONS_TIER is returned as itself, not flattened to "p2" here:
         # `collect` is the only place that can act on it, because the filter it
@@ -202,8 +213,17 @@ def collect(
             # Filtered on the built candidate rather than on the raw message, so
             # the @mention rule is `mentions_ben` itself (word-boundary matched
             # and already tested) and not a second, looser copy of it.
+            #
+            # `is_watched_thread` belongs in this disjunction because the tier
+            # hint these survivors carry is "p2", and a tagged thread is one of
+            # the two ways a p2 space notifies. Without it, moving a space into
+            # `## Mentions Only` was a demotion that *lost* coverage Ben already
+            # had while the space sat unlisted, where a watched thread made it
+            # eligible on its own.
             if mentions_only and not (
-                candidate["is_direct_mention"] or candidate["is_watchlist"]
+                candidate["is_direct_mention"]
+                or candidate["is_watchlist"]
+                or candidate["is_watched_thread"]
             ):
                 continue
             candidates.append(candidate)

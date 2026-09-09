@@ -17,6 +17,7 @@ P2_HEADER = re.compile(r"^###\s+Priority\s+2\b")
 # "Mentions only" resolved to "unlisted" and was therefore identical to "Never
 # scan" — a demoted channel went silent instead of surfacing @mentions.
 MENTIONS_HEADER = re.compile(r"^##\s+Mentions\s+Only\b")
+NEVER_HEADER = re.compile(r"^##\s+Never\s+Scan\b")
 WATCHLIST_HEADER = re.compile(r"^##\s+Watchlist\b")
 ANY_HEADER = re.compile(r"^#{1,6}\s")
 # "Rory Scott <rorscott@cisco.com>" — angle brackets are required so a bare
@@ -33,6 +34,7 @@ class PulsePrefs:
     p1: set[str] = field(default_factory=set)
     p2: set[str] = field(default_factory=set)
     mentions: set[str] = field(default_factory=set)
+    never: set[str] = field(default_factory=set)
     watchlist: dict[str, str] = field(default_factory=dict)
     unresolved: list[str] = field(default_factory=list)
 
@@ -42,10 +44,18 @@ class PulsePrefs:
         Precedence is explicit and descending because a Hub "move" that leaves a
         stale duplicate behind would otherwise silently demote a P1 channel.
 
-        `## Never Scan` is deliberately absent: "unlisted" already means "do not
-        fetch", so parsing it would only give one behaviour two names.
+        `## Never Scan` used to be left unparsed on the grounds that "unlisted"
+        already means "do not fetch", so naming it twice bought nothing. Making
+        group chats unconditionally eligible ended that: an unlisted space whose
+        title trips the group-chat heuristic is now fetched and escalated to P1,
+        so Never Scan and unlisted have genuinely different behaviour and the
+        explicit exclusion has to be readable. It is checked FIRST, ahead of even
+        p1 — a title in both lists is a contradiction, and the safe reading of a
+        contradiction is the quieter one.
         """
         key = _norm(title)
+        if key in self.never:
+            return "never"
         if key in self.p1:
             return "p1"
         if key in self.p2:
@@ -92,6 +102,10 @@ def parse_prefs(text: str) -> PulsePrefs:
     idx = _find(lines, MENTIONS_HEADER)
     if idx != -1:
         prefs.mentions = {_norm(t) for t in _bullets_under(lines, idx)}
+
+    idx = _find(lines, NEVER_HEADER)
+    if idx != -1:
+        prefs.never = {_norm(t) for t in _bullets_under(lines, idx)}
 
     idx = _find(lines, WATCHLIST_HEADER)
     if idx != -1:
