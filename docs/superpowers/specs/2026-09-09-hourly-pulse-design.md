@@ -40,7 +40,7 @@ normal output is nothing.
 **Not in scope for cycle 1:**
 
 - Quiet hours or in-meeting suppression — cycle 2
-- Replying from the Hub panel — cycle 2, see Open Question 2
+- Replying from the Hub panel — cycle 2, approved 2026-09-09
 - Slack via the approved app — cycle 3
 - Any change to `daily_summary.py`'s behavior, prompt, or output
 - Thread context in the panel beyond the triggering message and a deep link
