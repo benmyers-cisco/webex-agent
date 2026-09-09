@@ -86,6 +86,13 @@ def classify_sender(msg: dict, prefs, my_email: str) -> str:
     if prefs.is_watchlist(sender):
         return "keep"
 
+    # The msgraph CLI's search output carries no recipient fields at all —
+    # only from/subject/receivedDateTime/bodyPreview/webLink. With no
+    # recipients to check, presence in Ben's inbox (via `--folder inbox`,
+    # enforced in collect) is itself the addressing signal.
+    if "toRecipients" not in msg and "ccRecipients" not in msg:
+        return "keep"
+
     if me in _recipients(msg, "toRecipients") | _recipients(msg, "ccRecipients"):
         return "keep"
 
@@ -199,7 +206,7 @@ def collect(since_iso: str, prefs, my_email: str, runner=_run_msgraph) -> tuple[
     in it cleared the bar), and that must stay distinguishable from a failure.
     """
     day = (since_iso or "")[:10]
-    args = ["email", "search", f"received>={day}", "--max", MAX_RESULTS]
+    args = ["email", "search", f"received>={day}", "--max", MAX_RESULTS, "--folder", "inbox"]
 
     try:
         raw = runner(args)

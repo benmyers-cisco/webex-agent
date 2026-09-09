@@ -59,6 +59,58 @@ def test_cc_counts_as_direct():
     assert classify_sender(msg, PREFS, ME) == "keep"
 
 
+# The real msgraph CLI's `email search` output carries no recipient fields
+# at all (only from/subject/receivedDateTime/bodyPreview/webLink) — so the
+# to/cc check above is dead code in production unless absence of those
+# fields is itself handled. `--folder inbox` (asserted below) is what makes
+# "no recipient fields" a safe stand-in for "addressed to Ben".
+def _msg_no_recipients(over=None):
+    msg = _msg(over)
+    msg.pop("toRecipients", None)
+    msg.pop("ccRecipients", None)
+    return msg
+
+
+def test_no_recipient_fields_keeps_a_non_watchlist_human_sender():
+    msg = _msg_no_recipients({"from": {"name": "Someone", "address": "someone@cisco.com"}})
+    assert classify_sender(msg, PREFS, ME) == "keep"
+
+
+def test_no_recipient_fields_still_drops_an_automated_sender():
+    msg = _msg_no_recipients({"from": {"name": "Bot", "address": "noreply@github.com"}})
+    assert classify_sender(msg, PREFS, ME) == "drop"
+
+
+def test_no_recipient_fields_still_drops_mail_from_ben_himself():
+    msg = _msg_no_recipients({"from": {"name": "Ben Myers", "address": ME}})
+    assert classify_sender(msg, PREFS, ME) == "drop"
+
+
+def test_collect_passes_folder_inbox_to_the_runner():
+    seen_args = []
+
+    def capture(args):
+        seen_args.append(args)
+        return json.dumps({"messages": []})
+
+    collect("2026-09-09T12:30:00+00:00", PREFS, ME, runner=capture)
+    assert "--folder" in seen_args[0]
+    assert "inbox" in seen_args[0]
+
+
+def test_collect_with_no_recipient_fields_keeps_watchlist_and_human_drops_automated():
+    payload = json.dumps({"messages": [
+        _msg_no_recipients({"from": {"name": "Rory Scott", "address": "rorscott@cisco.com"}}),
+        _msg_no_recipients({"from": {"name": "Someone", "address": "someone@cisco.com"}}),
+        _msg_no_recipients({"from": {"name": "Bot", "address": "no-reply@cisco.com"}}),
+    ]})
+    candidates, status = collect(
+        "2026-09-09T12:30:00+00:00", PREFS, ME, runner=lambda _a: payload
+    )
+    assert status == "ok"
+    assert len(candidates) == 2
+
+
 def test_calendar_accept_notice_is_dropped():
     assert classify_sender(_msg({"subject": "Accepted: CII walk-through"}), PREFS, ME) == "drop"
 
