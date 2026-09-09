@@ -328,7 +328,8 @@ reply. Deep link into the space.
 
 Collapse governs the interrupt only. The panel is complete.
 
-**Cycle 1's panel is read-only.** See Open Question 2.
+**Cycle 1's panel is read-only** — click through to Webex or Outlook to reply. Replying from the Hub
+moves to cycle 2 (approved 2026-09-09).
 
 ---
 
@@ -397,7 +398,7 @@ Then: quiet hours, in-meeting suppression using the Hub's existing calendar rout
 prioritization Ben flagged on 2026-09-09.
 
 **Cycle 3 — Slack via the approved app.** Slack becomes a first-class source with the same tiering
-and the same bar. See Open Question 5 for the interim question about Slack notification emails.
+and the same bar. The interim `notification@slack.com` parsing added in cycle 1 retires at that point.
 
 ---
 
