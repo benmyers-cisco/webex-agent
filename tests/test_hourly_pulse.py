@@ -46,7 +46,7 @@ def _deps(tmp_path, **over):
         "last_run_path": str(tmp_path / ".last_pulse_run"),
         "my_email": "benmyers@cisco.com",
         "my_names": ["Ben Myers"],
-        "collect_webex": lambda **kw: [dict(CAND)],
+        "collect_webex": lambda **kw: ([dict(CAND)], "ok"),
         "collect_email": lambda **kw: ([], "ok"),
         "collect_calendar": lambda **kw: ([], "ok"),
         "classify": lambda **kw: [dict(PRIORITY_VERDICT)],
@@ -77,7 +77,7 @@ def test_the_same_item_on_a_second_run_does_not_notify_again(tmp_path):
 
 
 def test_no_candidates_means_no_notification(tmp_path):
-    payload = run(_deps(tmp_path, collect_webex=lambda **kw: []))
+    payload = run(_deps(tmp_path, collect_webex=lambda **kw: ([], "ok")))
     assert payload["notified_this_run"] is False
     assert payload["items"] == []
 
@@ -97,6 +97,23 @@ def test_a_degraded_email_source_is_reported_and_webex_still_runs(tmp_path):
     assert payload["status"] == "ok"
     assert payload["sources"]["email"] == "degraded: token expired"
     assert len(payload["items"]) == 1
+
+
+def test_a_degraded_webex_source_reaches_the_artifact_rather_than_reading_ok(tmp_path):
+    """F9. A run where get_messages failed for every listed space produces zero
+    Webex candidates. If `sources.webex` still says "ok", the panel renders a
+    total blackout as a quiet hour. The orchestrator must pass collect's status
+    through instead of hardcoding the literal.
+    """
+    deps = _deps(
+        tmp_path,
+        collect_webex=lambda **kw: ([], "degraded: 17 of 17 spaces could not be fetched"),
+        classify=lambda **kw: [],
+    )
+    payload = run(deps)
+    assert payload["sources"]["webex"] == "degraded: 17 of 17 spaces could not be fetched"
+    on_disk = json.load(open(tmp_path / "output" / "pulse.json"))
+    assert on_disk["sources"]["webex"] != "ok"
 
 
 def test_a_webex_failure_produces_a_failed_artifact_not_an_empty_one(tmp_path):
@@ -278,7 +295,7 @@ def test_an_item_notified_on_run_one_still_reads_notified_on_run_three(tmp_path)
     assert first["notified_this_run"] is True
     assert first["items"][0]["notified"] is True
 
-    quiet = run(_deps(tmp_path, collect_webex=lambda **kw: []))
+    quiet = run(_deps(tmp_path, collect_webex=lambda **kw: ([], "ok")))
     assert quiet["items"] == []
 
     third = run(_deps(tmp_path))
@@ -366,7 +383,7 @@ def test_a_degraded_classifier_is_reported_through_sources_and_stays_ok(tmp_path
     candidates = [dict(CAND), dict(CAND, at="2026-09-09T18:04:00+00:00", text="Second")]
     deps = _deps(
         tmp_path,
-        collect_webex=lambda **kw: [dict(c) for c in candidates],
+        collect_webex=lambda **kw: ([dict(c) for c in candidates], "ok"),
         classify=lambda **kw: [
             {"tier": "panel", "trigger": "p1", "why": "Classification failed: boom",
              "draft_reply": None, "classification_failed": True}
@@ -439,7 +456,7 @@ def test_notify_is_called_exactly_once_no_matter_how_many_priority_items(tmp_pat
 
     deps = _deps(
         tmp_path,
-        collect_webex=lambda **kw: [dict(c) for c in candidates],
+        collect_webex=lambda **kw: ([dict(c) for c in candidates], "ok"),
         classify=lambda **kw: [dict(PRIORITY_VERDICT) for _ in kw["candidates"]],
         notify=counting_notify,
     )
@@ -457,7 +474,7 @@ def test_notify_is_never_called_more_than_once_on_a_quiet_run(tmp_path):
         calls.append(list(items))
         return bool(items)
 
-    run(_deps(tmp_path, collect_webex=lambda **kw: [], notify=counting_notify))
+    run(_deps(tmp_path, collect_webex=lambda **kw: ([], "ok"), notify=counting_notify))
     assert len(calls) <= 1
 
 

@@ -103,11 +103,16 @@ def _run(deps: dict, now, now_iso: str, local_now, today: str, offset_hours: flo
 
     sources: dict[str, str] = {}
 
-    candidates = deps["collect_webex"](
+    # (candidates, status), not a bare list. The status is not decoration: a run
+    # where every per-space get_messages failed returns zero candidates, and
+    # hardcoding "ok" beside that made a total Webex blackout indistinguishable
+    # from a quiet hour on the panel. All three sources now report their own
+    # health the same way.
+    candidates, sources["webex"] = deps["collect_webex"](
         prefs=prefs, since=window_from, my_email=deps["my_email"],
         my_names=deps["my_names"],
     )
-    sources["webex"] = "ok"
+    candidates = list(candidates)
 
     email_candidates, sources["email"] = deps["collect_email"](
         since_iso=window_from.isoformat(), prefs=prefs, my_email=deps["my_email"]

@@ -79,7 +79,9 @@ def to_candidate(msg, space, tier_hint, prefs, my_email, my_names, watched_threa
     }
 
 
-def collect(webex, prefs, since, my_email, my_names, watched_space_threads) -> list[dict]:
+def collect(
+    webex, prefs, since, my_email, my_names, watched_space_threads
+) -> tuple[list[dict], str]:
     """Fetch candidates from every eligible space.
 
     `webex` is a WebexClient. `since` is a timezone-aware UTC datetime.
@@ -97,15 +99,32 @@ def collect(webex, prefs, since, my_email, my_names, watched_space_threads) -> l
     below rather than trust the client's filtering alone, since
     `get_messages` treats `after` as inclusive-at-boundary while the pulse's
     contract is strictly-after `since`.
+
+    Returns `(candidates, status)` like its email and calendar siblings. The
+    status is the only way a per-space fetch failure can reach the artifact: the
+    stderr warning below goes to /tmp/webex-pulse.log, which nothing surfaces,
+    so without the status a run where `get_messages` failed for EVERY space
+    would write `sources: {"webex": "ok"}` with zero items and the panel would
+    render a total blackout as a quiet hour. `list_spaces` raising is a
+    different case and still escapes to the run guard, which writes
+    status="failed" — that is louder, and correct, because without the space
+    list there is no denominator to be degraded against.
+
+    The denominator counts *attempted* spaces, not every space Webex returned:
+    "3 of 400" would read as a rounding error when it is really 3 of the 17
+    spaces Ben actually watches.
     """
     watched_space_threads = watched_space_threads or {}
     candidates: list[dict] = []
+    attempted = 0
+    failed = 0
 
     for space in webex.list_spaces(max_results=400):
         eligible, tier_hint = space_is_eligible(space, prefs, watched_space_threads)
         if not eligible:
             continue
 
+        attempted += 1
         watched_thread_ids = set(watched_space_threads.get(space["id"], []))
 
         try:
@@ -116,6 +135,7 @@ def collect(webex, prefs, since, my_email, my_names, watched_space_threads) -> l
             # One unreachable space must not take down the whole run, but the
             # gap must be observable — silence here would read as "nothing
             # happened in that space", which is a lie.
+            failed += 1
             print(
                 f"WARNING: pulse could not fetch messages for Webex space "
                 f"'{space.get('title', '?')}' ({space.get('id', '?')}): {exc}",
@@ -139,4 +159,8 @@ def collect(webex, prefs, since, my_email, my_names, watched_space_threads) -> l
                 )
             )
 
-    return candidates
+    if failed:
+        return candidates, (
+            f"degraded: {failed} of {attempted} spaces could not be fetched"
+        )
+    return candidates, "ok"

@@ -195,7 +195,7 @@ def test_collect_gathers_only_from_eligible_spaces():
         "unlisted-space": [_msg("b@cisco.com", "ordinary chatter")],
     }
     webex = FakeWebexClient(spaces, messages)
-    out = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    out, _status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
     assert len(out) == 1
     assert out[0]["channel"] == "C3 + CUI"
     assert out[0]["text"] == "watch this"
@@ -210,7 +210,7 @@ def test_collect_excludes_bens_own_messages():
         ]
     }
     webex = FakeWebexClient(spaces, messages)
-    out = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    out, _status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
     assert len(out) == 1
     assert out[0]["text"] == "someone else"
 
@@ -224,7 +224,7 @@ def test_collect_excludes_messages_at_or_before_since():
         ]
     }
     webex = FakeWebexClient(spaces, messages)
-    out = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    out, _status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
     assert [c["text"] for c in out] == ["fresh"]
 
 
@@ -235,10 +235,68 @@ def test_collect_survives_a_broken_room_and_warns_on_stderr(capsys):
     ]
     messages = {"ok-space": [_msg("a@cisco.com", "still here")]}
     webex = FakeWebexClient(spaces, messages, broken_rooms={"broken-space"})
-    out = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    out, _status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
     assert [c["text"] for c in out] == ["still here"]
     err = capsys.readouterr().err
     assert "C3 + CUI" in err or "broken-space" in err
+
+
+# --- F9: collect must be able to report its own degradation ----------------
+#
+# Email and calendar both return (candidates, status). Webex returning a bare
+# list is what let a run where get_messages failed for EVERY space write
+# `sources: {"webex": "ok"}` and zero items — a total blackout rendering as a
+# quiet hour. These three tests are the whole point of the tuple.
+
+
+def test_collect_reports_ok_when_every_space_was_fetched():
+    spaces = [{"title": "C3 + CUI", "type": "group", "id": "p1-space"}]
+    webex = FakeWebexClient(spaces, {"p1-space": [_msg("a@cisco.com", "hi")]})
+    _out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    # Exactly "ok": the Hub treats any other value as degraded, so a well-meant
+    # "ok (1 space)" would light the panel up on a healthy run.
+    assert status == "ok"
+
+
+def test_collect_reports_degraded_when_some_spaces_could_not_be_fetched():
+    spaces = [
+        {"title": "C3 + CUI", "type": "group", "id": "broken-space"},
+        {"title": "SCC - CII Discussion", "type": "group", "id": "ok-space"},
+    ]
+    messages = {"ok-space": [_msg("a@cisco.com", "still here")]}
+    webex = FakeWebexClient(spaces, messages, broken_rooms={"broken-space"})
+    out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert [c["text"] for c in out] == ["still here"]
+    assert status == "degraded: 1 of 2 spaces could not be fetched"
+
+
+def test_collect_reports_degraded_when_every_space_failed_rather_than_ok_and_empty():
+    """The blackout case. 429s or post-membership-change 403s across the board
+    produce zero candidates; without this, the run says `ok` and the panel says
+    "nothing has needed you", which is invariant 1 inverted.
+    """
+    spaces = [
+        {"title": "C3 + CUI", "type": "group", "id": "a"},
+        {"title": "SCC - CII Discussion", "type": "group", "id": "b"},
+    ]
+    webex = FakeWebexClient(spaces, {}, broken_rooms={"a", "b"})
+    out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert out == []
+    assert status == "degraded: 2 of 2 spaces could not be fetched"
+
+
+def test_collect_counts_only_eligible_spaces_in_the_denominator():
+    """m is "spaces we tried", not "spaces Webex has". Counting the ~400
+    unlisted spaces would make "3 of 400" read as a rounding error when it is
+    in fact 3 of the 17 that matter.
+    """
+    spaces = [
+        {"title": "C3 + CUI", "type": "group", "id": "broken-space"},
+        {"title": "Random Chat", "type": "group", "id": "unlisted-space"},
+    ]
+    webex = FakeWebexClient(spaces, {}, broken_rooms={"broken-space"})
+    _out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert status == "degraded: 1 of 1 spaces could not be fetched"
 
 
 def test_collect_uses_watched_space_threads_for_unlisted_space():
@@ -255,7 +313,7 @@ def test_collect_uses_watched_space_threads_for_unlisted_space():
         ]
     }
     webex = FakeWebexClient(spaces, messages)
-    out = collect(
+    out, _status = collect(
         webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {"unlisted-space": ["thread-1"]}
     )
     assert len(out) == 1
