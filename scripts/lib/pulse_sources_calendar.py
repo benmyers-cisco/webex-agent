@@ -64,6 +64,28 @@ def _parse_start(start) -> datetime | None:
     return None
 
 
+def _readable_events(events: list) -> tuple[list[tuple[dict, datetime]], int]:
+    """Split `events` into (event, parsed-start) pairs that can be read at
+    all, plus a count of elements that could not be — not a dict, or a
+    missing/unparseable `start`. "Unreadable" is deliberately narrower than
+    "not imminent": a perfectly valid event that just falls outside the
+    lookahead window is not counted here, only ones that couldn't be
+    understood in the first place.
+    """
+    readable = []
+    unreadable = 0
+    for event in events or []:
+        if not isinstance(event, dict):
+            unreadable += 1
+            continue
+        start = _parse_start(event.get("start"))
+        if start is None:
+            unreadable += 1
+            continue
+        readable.append((event, start))
+    return readable, unreadable
+
+
 def imminent_meetings(events: list[dict], now: datetime, lookahead_hours: int) -> list[dict]:
     """Meetings starting strictly after `now` and strictly before the
     lookahead edge. Both edges are exclusive: a meeting starting exactly
@@ -78,13 +100,9 @@ def imminent_meetings(events: list[dict], now: datetime, lookahead_hours: int) -
     not guaranteed to have pre-validated the list.
     """
     horizon = now + timedelta(hours=lookahead_hours)
+    readable, _unreadable = _readable_events(events)
     out = []
-    for event in events or []:
-        if not isinstance(event, dict):
-            continue
-        start = _parse_start(event.get("start"))
-        if start is None:
-            continue
+    for event, start in readable:
         if now < start < horizon:
             out.append({"subject": event.get("subject") or "(untitled)", "start": start.isoformat()})
     return out
@@ -140,11 +158,26 @@ def collect(now: datetime, runner=_run_msgraph) -> tuple[list[dict], str]:
 
     # The container can be a well-formed list while an individual element is
     # still hostile (a bare int, or a `start` that trips a comparison
-    # between naive and aware datetimes). imminent_meetings already skips
-    # what it can, but nothing here may be allowed to propagate — this call
-    # has to stay inside the guarded region so any surprise still comes
-    # back as "degraded: <reason>" instead of raising out of collect.
+    # between naive and aware datetimes). Parsing already skips what it
+    # can, but nothing here may be allowed to propagate — this stays inside
+    # the guarded region so any surprise still comes back as
+    # "degraded: <reason>" instead of raising out of collect.
     try:
-        return imminent_meetings(events, now, LOOKAHEAD_HOURS), "ok"
+        horizon = now + timedelta(hours=LOOKAHEAD_HOURS)
+        readable, unreadable = _readable_events(events)
+        # Mirrors pulse_sources_email.py's rule for the same condition: a
+        # non-empty payload where every element was unreadable is a signal
+        # the shape changed underneath us, not proof the calendar is quiet.
+        # An empty payload, or one where only some elements were bad, stays
+        # "ok" — an empty calendar is real, and one bad element must never
+        # suppress the good ones or flip the whole run to degraded.
+        if events and unreadable == len(events):
+            return [], "degraded: no usable events in msgraph output"
+        meetings = [
+            {"subject": event.get("subject") or "(untitled)", "start": start.isoformat()}
+            for event, start in readable
+            if now < start < horizon
+        ]
+        return meetings, "ok"
     except Exception as exc:  # noqa: BLE001 — any failure degrades, none propagates
         return [], f"degraded: {exc}"

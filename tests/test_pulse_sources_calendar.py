@@ -203,17 +203,39 @@ def test_imminent_meetings_skips_a_non_dict_element_directly():
     assert [m["subject"] for m in imminent_meetings(events, NOW, 2)] == ["Good"]
 
 
-def test_collect_does_not_raise_when_events_are_all_wrong_shape():
-    # All elements are unusable, so there are no meetings — but that must
-    # come back as a normal "ok" empty result, never a raised exception.
+# --- Bug fix round 2: a non-empty payload where every element is unreadable
+# must not be indistinguishable from a genuinely quiet calendar — mirrors
+# pulse_sources_email.py's "no usable messages" rule, same status shape. ---
+
+
+def test_collect_degrades_when_every_event_is_unreadable():
+    # All elements are unusable — this must never raise (round 1), but it
+    # also must not read as "ok, no meetings soon" (round 2): a shape change
+    # in msgraph's output would otherwise make the pulse silently report a
+    # quiet calendar forever.
     payload = json.dumps({"events": [1, 2, 3]})
     meetings, status = collect(NOW, runner=lambda _a: payload)
     assert meetings == []
-    assert status == "ok"
+    assert status == "degraded: no usable events in msgraph output"
 
 
 def test_collect_returns_the_good_meeting_from_a_mixed_batch_not_empty():
+    # Some elements usable, one is not — stays "ok" with the good meeting.
+    # One bad element must never suppress the good ones or flip the run to
+    # degraded.
     payload = json.dumps({"events": [1, _event("Good", "2026-09-09T19:00:00+00:00")]})
     meetings, status = collect(NOW, runner=lambda _a: payload)
     assert status == "ok"
     assert [m["subject"] for m in meetings] == ["Good"]
+
+
+def test_collect_stays_ok_when_all_events_are_valid_but_outside_the_window():
+    # Regression guard: "unreadable" must never be confused with "readable
+    # but not imminent". A calendar full of perfectly valid meetings that
+    # are all more than the lookahead away is the normal case, not a
+    # degraded one — getting this backwards would make the pulse cry
+    # degraded on almost every ordinary hour.
+    payload = json.dumps({"events": [_event("Tomorrow thing", "2026-09-09T23:00:00+00:00")]})
+    meetings, status = collect(NOW, runner=lambda _a: payload)
+    assert meetings == []
+    assert status == "ok"
