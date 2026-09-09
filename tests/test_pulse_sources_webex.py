@@ -35,6 +35,12 @@ def test_unrelated_text_is_not_a_mention():
     assert mentions_ben("deploy finished", MY_EMAIL, MY_NAMES) is False
 
 
+def test_multiword_name_does_not_match_as_a_substring_of_a_longer_name():
+    # "Ben Myers" must not match inside "Ben Myerson" — that's what the \b
+    # word-boundary guards against. Without it, this is a substring hit.
+    assert mentions_ben("Ben Myerson signed off on it", MY_EMAIL, MY_NAMES) is False
+
+
 def test_p1_space_is_eligible():
     ok, tier = space_is_eligible({"title": "C3 + CUI", "type": "group", "id": "1"}, PREFS, {})
     assert (ok, tier) == (True, "p1")
