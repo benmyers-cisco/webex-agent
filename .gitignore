@@ -1,6 +1,10 @@
 .env
 .webex_token.json
 preferences.md
+# The .bak the tooling writes before every edit, and any dated migration copy.
+# preferences.md has no git history, so those copies are the only thing standing
+# between a bad edit and a rebuild from memory — they must never be committable.
+preferences.md.*
 .last_run
 .known_spaces.json
 .watched_threads.json
