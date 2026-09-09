@@ -76,10 +76,30 @@ cycle 1 rather than deferred.
 
 Three inputs, evaluated independently. Any one firing makes an item priority.
 
-### 1. Watchlist person — unconditional
+### 1. Watchlist person — sufficient on its own, within an eligible space
 
-Anything from a watchlist person is priority, in any channel, including DMs and channels that
-appear in no list. This is the primary driver, not a qualifier layered on a channel rule.
+Anything from a watchlist person is priority. It is the primary driver, not a qualifier layered on a
+channel rule: a watchlist sender needs no @mention, no thread membership, and no channel tier to
+reach `priority`.
+
+**Scope, as built in cycle 1:** this applies in every space the pulse fetches — DMs, group chats,
+P1, P2, Mentions Only, and any space with a thread Ben has been tagged in. It does **not** apply in
+a named space that appears in no list, because collection decides eligibility from the space before
+any sender is examined, so a watchlist sender in an unlisted named space is never fetched.
+
+Reaching them too is **deferred past cycle 1**, deliberately, for three reasons:
+
+- It is a scoped design problem, not a fix. Delivering it means scanning ~400 unlisted spaces every
+  hour to find a handful of senders.
+- The common case is already covered. A watchlist person reaching Ben outside a listed space almost
+  always does it in a DM or a group chat, and both are fetched unconditionally.
+- This is being built in cycles, and an unbuilt capability that no document promises is a backlog
+  item rather than a hole.
+
+Until it is built, no document may state the unconditional form. The earlier wording ("in any
+channel, including channels that appear in no list") described behaviour the code did not have, in
+three places at once — including `preferences.md`, which is passed to the classifier as prompt text,
+so the model was being told a rule collection could not deliver.
 
 Stored as `- Name <email>` because Webex messages carry `personEmail`, not display names. Emails
 resolved with `msgraph resolve-person`.
@@ -97,10 +117,19 @@ Tal Surasky.
 |---|---|---|
 | **P1** | Qualifying activity is priority | Full scan — unchanged |
 | **P2** | Priority **only** if Ben is directly @mentioned, or there is new activity in a thread he has been tagged in | Full scan — unchanged |
-| **Everything else** | Never | @mention-only, as today |
+| **Mentions Only** | Fetched, but **only** messages that @mention Ben or come from a watchlist sender are collected at all; those are then judged as P2 | Full scan — unchanged |
+| **Everything else** | Never fetched — so nothing in it can reach the panel, including a watchlist sender (see rule 1's scope) | @mention-only, as today |
 
-DMs and group chats are treated as P1. A DM is inherently aimed at Ben, so it clears the
-can-this-wait test far more often than a channel post does.
+"Mentions Only" is a real tier, not documentation of what unlisted spaces already do. An unlisted
+space does not surface on @mention in the pulse; it does not surface at all. Demoting a channel to
+Mentions Only therefore keeps @mentions reaching Ben while dropping the channel's ordinary traffic —
+which is what the label says and what the daily triage does.
+
+DMs and group chats are treated as P1, unconditionally and with no entry in any list. A DM is
+inherently aimed at Ben, so it clears the can-this-wait test far more often than a channel post
+does, and an ad-hoc group chat is a named handful of people rather than a broadcast. A group chat is
+recognised by `daily_summary._is_group_chat` — imported, not re-implemented, so the pulse and the
+daily triage cannot drift on which spaces this covers.
 
 ### 3. Meeting-imminent
 
@@ -426,6 +455,8 @@ All cycle-1 blocking questions were resolved on 2026-09-09. What remains:
 | 2026-09-09 | Badge and sound gated on priority; non-priority gets no indicator at all | Ben |
 | 2026-09-09 | Email scope: direct human mail plus a named-sender watchlist | Ben |
 | 2026-09-09 | Watchlist person is priority unconditionally, in any channel | Ben |
+| 2026-09-09 | **Narrowed:** watchlist is sufficient on its own *within an eligible space* (listed, DM, group chat, Mentions Only, tagged thread). Unlisted named spaces are deferred past cycle 1 — delivering it means scanning ~400 spaces hourly, and DMs plus group chats already cover the common case. Rule 1, the tier table and `preferences.md` were reconciled to the code rather than the code to them. | Ben, on final-review F15 |
+| 2026-09-09 | Mentions Only is a real tier the pulse implements: fetched, filtered to @mentions and watchlist senders, judged as P2. It was previously indistinguishable from Never Scan. | final-review F4 |
 | 2026-09-09 | Channel tiers restructured to P1 / P2 / everything-else | Ben |
 | 2026-09-09 | P2 is priority only on a direct @mention or a tagged thread | Ben |
 | 2026-09-09 | DMs and group chats treated as P1 | Nigel proposed, Ben accepted |
