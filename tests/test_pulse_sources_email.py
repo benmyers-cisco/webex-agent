@@ -189,6 +189,49 @@ def test_collect_ok_with_truly_empty_inbox_is_distinguishable_from_a_failure():
     assert status == "ok"
 
 
+def test_collect_reports_degraded_when_messages_is_not_a_list():
+    payload = json.dumps({"messages": "oops"})
+    candidates, status = collect(
+        "2026-09-09T12:30:00+00:00", PREFS, ME, runner=lambda _a: payload
+    )
+    assert candidates == []
+    assert status.startswith("degraded:")
+
+
+def test_collect_reports_degraded_when_messages_are_all_wrong_shape():
+    payload = json.dumps({"messages": [1, 2, 3]})
+    candidates, status = collect(
+        "2026-09-09T12:30:00+00:00", PREFS, ME, runner=lambda _a: payload
+    )
+    assert candidates == []
+    assert status.startswith("degraded:")
+
+
+def test_collect_reports_is_watchlist_true_for_a_watchlisted_sender():
+    payload = json.dumps({"messages": [
+        _msg({
+            "from": {"name": "Rory Scott", "address": "rorscott@cisco.com"},
+            "toRecipients": [{"address": "someone-else@cisco.com"}],
+        }),
+    ]})
+    candidates, status = collect(
+        "2026-09-09T12:30:00+00:00", PREFS, ME, runner=lambda _a: payload
+    )
+    assert status == "ok"
+    assert len(candidates) == 1
+    assert candidates[0]["is_watchlist"] is True
+
+
+def test_collect_reports_is_watchlist_false_for_a_non_watchlisted_sender():
+    payload = json.dumps({"messages": [_msg()]})
+    candidates, status = collect(
+        "2026-09-09T12:30:00+00:00", PREFS, ME, runner=lambda _a: payload
+    )
+    assert status == "ok"
+    assert len(candidates) == 1
+    assert candidates[0]["is_watchlist"] is False
+
+
 # --- Hardening: classify_sender must not let automated mail through, even
 # when it would otherwise qualify (direct recipient, or on the watchlist). ---
 
@@ -221,13 +264,23 @@ def test_automated_senders_constant_is_exactly_the_briefs_entries():
 
 
 def test_watchlist_match_requires_the_exact_address_not_a_substring():
-    # "ory@cisco.com" is not "rorscott@cisco.com" even though the two share
-    # letters. This must not be treated as a watchlist hit.
-    msg = _msg({
-        "from": {"name": "Someone Else", "address": "ory@cisco.com"},
+    # Case 1: the candidate address CONTAINS the watchlisted address as a
+    # substring ("rorscott@cisco.com" inside "xrorscott@cisco.com") but is
+    # not equal to it. Must not be treated as a watchlist hit.
+    msg_superset = _msg({
+        "from": {"name": "Someone Else", "address": "xrorscott@cisco.com"},
         "toRecipients": [{"address": "someone-else@cisco.com"}],
     })
-    assert classify_sender(msg, PREFS, ME) == "drop"
+    assert classify_sender(msg_superset, PREFS, ME) == "drop"
+
+    # Case 2: the WATCHLISTED address contains the candidate address as a
+    # substring ("orscott@cisco.com" inside "rorscott@cisco.com") but the
+    # candidate itself is not equal to the watchlisted entry.
+    msg_subset = _msg({
+        "from": {"name": "Someone Else", "address": "orscott@cisco.com"},
+        "toRecipients": [{"address": "someone-else@cisco.com"}],
+    })
+    assert classify_sender(msg_subset, PREFS, ME) == "drop"
 
 
 def test_watchlist_match_is_case_insensitive_on_the_address():

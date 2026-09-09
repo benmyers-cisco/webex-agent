@@ -131,7 +131,7 @@ def parse_slack_notification(msg: dict) -> dict | None:
     return {"from_name": who, "text": text}
 
 
-def to_candidate(msg: dict, disposition: str) -> dict:
+def to_candidate(msg: dict, disposition: str, prefs=None) -> dict:
     web_link = msg.get("web_link") or ""
     received = msg.get("received") or ""
     subject = msg.get("subject") or "(no subject)"
@@ -151,23 +151,24 @@ def to_candidate(msg: dict, disposition: str) -> dict:
             "at": received,
             "text": parsed["text"],
             "link": web_link,
-            "is_watchlist": False,
+            "is_watchlist": prefs.is_watchlist(SLACK_SENDER) if prefs else False,
             "is_direct_mention": True,
             "is_watched_thread": False,
             "tier_hint": "slack_panel",
         }
 
     sender = msg.get("from") or {}
+    from_email = _addr(sender)
     return {
         "source": "email",
         "channel": "Email",
         "space_id": None,
-        "from_name": (sender.get("name") or _addr(sender)),
-        "from_email": _addr(sender),
+        "from_name": (sender.get("name") or from_email),
+        "from_email": from_email,
         "at": received,
         "text": f"Subject: {subject}\n\n{msg.get('body_preview') or ''}",
         "link": web_link,
-        "is_watchlist": False,
+        "is_watchlist": prefs.is_watchlist(from_email) if prefs else False,
         "is_direct_mention": True,
         "is_watched_thread": False,
         "tier_hint": "email",
@@ -206,13 +207,23 @@ def collect(since_iso: str, prefs, my_email: str, runner=_run_msgraph) -> tuple[
     except (ValueError, TypeError, AttributeError) as exc:
         return [], f"degraded: unparseable msgraph output ({exc})"
 
+    if not isinstance(messages, list):
+        return [], "degraded: unparseable msgraph output (messages is not a list)"
+
     candidates = []
+    skipped = 0
     for msg in messages:
+        if not isinstance(msg, dict):
+            skipped += 1
+            continue
         if (msg.get("received") or "") < since_iso:
             continue
         disposition = classify_sender(msg, prefs, my_email)
         if disposition == "drop":
             continue
-        candidates.append(to_candidate(msg, disposition))
+        candidates.append(to_candidate(msg, disposition, prefs))
+
+    if messages and skipped == len(messages):
+        return [], "degraded: no usable messages in msgraph output"
 
     return candidates, "ok"
