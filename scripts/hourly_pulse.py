@@ -74,6 +74,28 @@ def run(deps: dict) -> dict:
     local_now = now + timedelta(hours=offset_hours)
     today = local_now.strftime("%Y-%m-%d")
 
+    # Hoisted out of _run and given its own guard. Two things have to be true at
+    # once and they pull in opposite directions:
+    #
+    #   - The previous day's artifact must be moved aside before ANY payload can
+    #     be written over it, including a failure payload. Keeping this as _run's
+    #     first statement made that true only by accident of statement order:
+    #     anything inserted above it would let a failing first-run-of-the-day
+    #     write straight over yesterday's artifact. Up here it is structural.
+    #   - Its own failure must not cost this run its artifact. os.replace can
+    #     fail, and an OSError escaping into the run guard would write a failure
+    #     payload over the very file the archive was trying to preserve, losing
+    #     both. So it warns and continues: the archive is a convenience, the
+    #     artifact is the invariant.
+    try:
+        pulse_output.archive_if_new_day(deps["output_dir"], today)
+    except Exception as exc:  # noqa: BLE001 — see above
+        print(
+            "WARNING: could not archive the previous day's pulse artifact "
+            f"({type(exc).__name__}: {exc}); this run will write over it",
+            file=sys.stderr,
+        )
+
     # Broad on purpose. The source and output modules degrade rather than raise,
     # but the output builders deliberately raise on hostile input (verdicts=None,
     # a non-dict verdict, a corrupted seen store that loads as a string), and
@@ -90,7 +112,9 @@ def run(deps: dict) -> dict:
 
 
 def _run(deps: dict, now, now_iso: str, local_now, today: str, offset_hours: float) -> dict:
-    pulse_output.archive_if_new_day(deps["output_dir"], today)
+    # archive_if_new_day is deliberately NOT here — see run(). It has to happen
+    # before the failure payload can be written too, which means before this
+    # function is entered at all.
     prefs = parse_prefs(deps["prefs_text"])
     state = pulse_state.load_state(deps["state_path"], today)
     # The coerced offset, not deps["tz_offset_hours"]: the window's 08:30 floor

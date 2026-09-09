@@ -236,6 +236,44 @@ def test_a_new_day_archives_yesterdays_artifact(tmp_path):
     assert (tmp_path / "output" / "pulse-2026-09-09.json").exists()
 
 
+def test_a_failing_first_run_of_a_new_day_archives_rather_than_destroys(tmp_path):
+    """F11. archive_if_new_day was the first statement of _run, so it was skipped
+    whenever the run guard fired — and the guard then wrote a failure payload
+    straight over the previous day's artifact. A Monday failure destroyed
+    Friday's pulse.
+    """
+    run(_deps(tmp_path))
+    friday = json.load(open(tmp_path / "output" / "pulse.json"))
+    assert friday["day"] == "2026-09-09"
+
+    monday = datetime(2026, 9, 10, 13, 15, tzinfo=UTC)
+    payload = run(_deps(tmp_path, now=monday, collect_webex=_boom))
+    assert payload["status"] == "failed"
+
+    archived = tmp_path / "output" / "pulse-2026-09-09.json"
+    assert archived.exists(), "the previous day's artifact was overwritten"
+    assert json.load(open(archived))["items"] == friday["items"]
+    assert json.load(open(tmp_path / "output" / "pulse.json"))["status"] == "failed"
+
+
+def test_an_archive_that_raises_does_not_cost_the_artifact(tmp_path, monkeypatch, capsys):
+    """The archive is a convenience; the artifact is the invariant. Moving the
+    archive earlier must not create a path where a failed rename means no
+    artifact at all — silence reads as a quiet hour.
+    """
+    from lib import pulse_output
+
+    def explode(output_dir, today):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(pulse_output, "archive_if_new_day", explode)
+    payload = run(_deps(tmp_path))
+
+    assert payload["status"] == "ok"
+    assert json.load(open(tmp_path / "output" / "pulse.json"))["status"] == "ok"
+    assert "archive" in capsys.readouterr().err
+
+
 def test_a_new_day_clears_the_seen_store_and_can_notify_again(tmp_path):
     deps = _deps(tmp_path)
     run(deps)
