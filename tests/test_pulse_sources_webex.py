@@ -70,6 +70,67 @@ def test_unlisted_space_with_a_watched_thread_is_eligible():
     assert (ok, tier) == (True, "p2")
 
 
+# --- F16: the spec says DMs AND GROUP CHATS are treated as P1 --------------
+#
+# spec :102 and decision log :431. Only `type == "direct"` was special-cased, so
+# a Webex ad-hoc group chat — `type: "group"` with a participant-name title —
+# fell through tier_of() to "unlisted" and was skipped. The migration then
+# deleted the one such entry from preferences.md on the grounds that group chats
+# are scanned unconditionally, which is true of daily_summary and was false
+# here, so that space went from watched to invisible.
+
+
+def test_a_group_chat_is_eligible_as_a_dm():
+    ok, tier = space_is_eligible(
+        {"title": "Aamir Yousufzai, Ben Gaspar, Mike Wojan", "type": "group", "id": "g"},
+        PREFS, {},
+    )
+    assert (ok, tier) == (True, "dm")
+
+
+def test_a_two_person_group_chat_is_eligible_as_a_dm():
+    ok, tier = space_is_eligible(
+        {"title": "Di Yin Lu, Adam Greer", "type": "group", "id": "g2"}, PREFS, {}
+    )
+    assert (ok, tier) == (True, "dm")
+
+
+def test_a_comma_bearing_channel_name_is_not_mistaken_for_a_group_chat():
+    """The rule is a title heuristic, so its false positives matter: a listed
+    channel name containing a comma must not be promoted to DM treatment.
+    """
+    ok, tier = space_is_eligible(
+        {"title": "AI Canvas, UAIA, C3 - Product Integration Execution (PM/Eng)",
+         "type": "group", "id": "g3"},
+        PREFS, {},
+    )
+    assert (ok, tier) == (False, "unlisted")
+
+
+def test_the_group_chat_rule_is_daily_summarys_rule_and_not_a_third_copy():
+    """The tier vocabulary already lives in three places; a fourth copy of the
+    group-chat heuristic is how it drifts. This pins that the pulse's answer is
+    literally daily_summary's answer, so a change there cannot silently diverge.
+    """
+    from daily_summary import _is_group_chat
+
+    titles = [
+        "Aamir Yousufzai, Ben Gaspar, Mike Wojan",
+        "Di Yin Lu, Adam Greer",
+        "Random Chat",
+        "AI Canvas, UAIA, C3 - Product Integration Execution (PM/Eng)",
+        "help-identity-security-intelligence",
+        "",
+    ]
+    for title in titles:
+        space = {"title": title, "type": "group", "id": "probe"}
+        ok, tier = space_is_eligible(space, PREFS, {})
+        if _is_group_chat(space):
+            assert (ok, tier) == (True, "dm"), title
+        else:
+            assert tier != "dm", title
+
+
 def test_candidate_flags_a_watchlist_sender():
     cand = to_candidate(
         {"personEmail": "rorscott@cisco.com", "personDisplayName": "Rory Scott",
@@ -297,6 +358,21 @@ def test_collect_counts_only_eligible_spaces_in_the_denominator():
     webex = FakeWebexClient(spaces, {}, broken_rooms={"broken-space"})
     _out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
     assert status == "degraded: 1 of 1 spaces could not be fetched"
+
+
+def test_collect_gathers_from_a_group_chat_that_appears_in_no_list():
+    """End to end for F16: the space the migration deleted from Always Scan on
+    the grounds that group chats are scanned unconditionally.
+    """
+    spaces = [
+        {"title": "Aamir Yousufzai, Ben Gaspar, Mike Wojan", "type": "group", "id": "gc"},
+    ]
+    messages = {"gc": [_msg("ayousufz@cisco.com", "can you take the CUI slide?")]}
+    webex = FakeWebexClient(spaces, messages)
+    out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert [c["text"] for c in out] == ["can you take the CUI slide?"]
+    assert out[0]["tier_hint"] == "dm"
+    assert status == "ok"
 
 
 def test_collect_uses_watched_space_threads_for_unlisted_space():

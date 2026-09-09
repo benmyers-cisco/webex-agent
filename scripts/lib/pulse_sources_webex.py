@@ -30,14 +30,42 @@ def mentions_ben(text: str, my_email: str, my_names: list[str]) -> bool:
     return False
 
 
+def is_group_chat(space: dict) -> bool:
+    """daily_summary's group-chat heuristic, imported rather than re-copied.
+
+    Imported lazily, for two reasons. First, daily_summary's module body runs
+    load_dotenv and imports anthropic and the oauth client, and every pulse lib
+    module is deliberately importable with no env, no network and no model — a
+    module-level import here would end that. Second, by the time this is called
+    we are inside hourly_pulse._run, so an ImportError becomes a status="failed"
+    artifact rather than an import-time crash that writes nothing at all, and
+    silence reading as success is the one outcome this design exists to prevent.
+
+    Not reimplemented: the tier vocabulary already lives in three places, and a
+    fourth copy of this heuristic is how it drifts out of agreement with the
+    daily triage.
+    """
+    from daily_summary import _is_group_chat
+
+    return _is_group_chat(space)
+
+
 def space_is_eligible(space: dict, prefs, watched_space_threads: dict) -> tuple[bool, str]:
     """Whether this space's messages are worth fetching, and at which tier.
 
     A DM is inherently aimed at Ben, so it gets its own tier. An unlisted space
     with a thread he's been tagged in is treated as p2 — the thread earns the
     look, the space doesn't.
+
+    A Webex ad-hoc group chat is type "group" with a participant-name title, so
+    without the second half of the first check it falls through tier_of() to
+    "unlisted" and is skipped. The spec puts group chats alongside DMs at P1 for
+    the same reason a DM is there: a named handful of people in a room is aimed
+    at Ben rather than broadcast near him. It also means such a space needs no
+    entry in preferences.md — which is why the migration was right to delete the
+    one it found, and wrong about the pulse honouring it.
     """
-    if space.get("type") == "direct":
+    if space.get("type") == "direct" or is_group_chat(space):
         return True, "dm"
 
     tier = prefs.tier_of(space.get("title", ""))
