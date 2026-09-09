@@ -12,6 +12,9 @@ PREFS = parse_prefs("""
 
 ### Priority 2 — Tagged Only
 - SCC - CII Discussion
+
+## Mentions Only
+- Duo PM Sync
 """)
 
 MY_EMAIL = "benmyers@cisco.com"
@@ -61,6 +64,17 @@ def test_direct_space_is_eligible_as_dm():
 def test_unlisted_space_is_skipped():
     ok, tier = space_is_eligible({"title": "Random Chat", "type": "group", "id": "4"}, PREFS, {})
     assert ok is False
+
+
+def test_a_mentions_only_space_is_eligible_and_carries_its_own_tier():
+    """F4. It used to resolve to "unlisted" and be skipped before a single
+    message was fetched, which made "Mentions only" and "Never scan" the same
+    thing in the pulse. `collect` translates this tier to a p2 hint.
+    """
+    ok, tier = space_is_eligible(
+        {"title": "Duo PM Sync", "type": "group", "id": "m"}, PREFS, {}
+    )
+    assert (ok, tier) == (True, "mentions")
 
 
 def test_unlisted_space_with_a_watched_thread_is_eligible():
@@ -357,6 +371,50 @@ def test_collect_counts_only_eligible_spaces_in_the_denominator():
     ]
     webex = FakeWebexClient(spaces, {}, broken_rooms={"broken-space"})
     _out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert status == "degraded: 1 of 1 spaces could not be fetched"
+
+
+def test_collect_takes_only_mentions_and_watchlist_from_a_mentions_only_space():
+    """The half that makes the label true rather than merely making the space P2.
+    A mentions-tier space must not dump its backlog into the panel — that is the
+    noise Ben demoted it to escape.
+    """
+    spaces = [{"title": "Duo PM Sync", "type": "group", "id": "m"}]
+    messages = {
+        "m": [
+            _msg("noisy@cisco.com", "sprint board updated"),
+            _msg("someone@cisco.com", "Ben Myers can you take this?"),
+            _msg("rorscott@cisco.com", "no mention, but I'm on the watchlist"),
+        ]
+    }
+    webex = FakeWebexClient(spaces, messages)
+    out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert [c["text"] for c in out] == [
+        "Ben Myers can you take this?",
+        "no mention, but I'm on the watchlist",
+    ]
+    assert {c["tier_hint"] for c in out} == {"p2"}
+    assert status == "ok"
+
+
+def test_collect_returns_nothing_from_a_quiet_mentions_only_space():
+    spaces = [{"title": "Duo PM Sync", "type": "group", "id": "m"}]
+    messages = {"m": [_msg("noisy@cisco.com", "standup notes")]}
+    webex = FakeWebexClient(spaces, messages)
+    out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert out == []
+    # Filtered, not failed: the space was reached, so nothing is degraded.
+    assert status == "ok"
+
+
+def test_a_broken_mentions_only_space_still_counts_toward_the_degraded_status():
+    """Its messages are filtered, but its reachability is not — an unfetchable
+    mentions space is one where an @mention would be missed silently.
+    """
+    spaces = [{"title": "Duo PM Sync", "type": "group", "id": "m"}]
+    webex = FakeWebexClient(spaces, {}, broken_rooms={"m"})
+    out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert out == []
     assert status == "degraded: 1 of 1 spaces could not be fetched"
 
 

@@ -16,6 +16,10 @@ _MIN_NAME_WORDS = 2
 # One hourly pass per space; generous enough to catch a busy hour without
 # paging deep into history the "since" filter would discard anyway.
 _MESSAGES_PER_SPACE = 100
+# preferences.md's `## Mentions Only`. Eligible for a fetch, but only the
+# messages that name Ben or come from a watchlist sender survive it — that is
+# what makes the Hub's label true rather than just making the space P2.
+MENTIONS_TIER = "mentions"
 
 
 def mentions_ben(text: str, my_email: str, my_names: list[str]) -> bool:
@@ -69,7 +73,10 @@ def space_is_eligible(space: dict, prefs, watched_space_threads: dict) -> tuple[
         return True, "dm"
 
     tier = prefs.tier_of(space.get("title", ""))
-    if tier in ("p1", "p2"):
+    if tier in ("p1", "p2", MENTIONS_TIER):
+        # MENTIONS_TIER is returned as itself, not flattened to "p2" here:
+        # `collect` is the only place that can act on it, because the filter it
+        # implies is per-message rather than per-space. It translates the hint.
         return True, tier
 
     if space.get("id") in watched_space_threads:
@@ -148,9 +155,17 @@ def collect(
     failed = 0
 
     for space in webex.list_spaces(max_results=400):
-        eligible, tier_hint = space_is_eligible(space, prefs, watched_space_threads)
+        eligible, space_tier = space_is_eligible(space, prefs, watched_space_threads)
         if not eligible:
             continue
+
+        # A mentions-tier space is fetched in full and then filtered to the
+        # messages that actually name Ben or come from a watchlist sender. The
+        # hint the classifier sees is "p2", because that is the urgency rule the
+        # surviving messages get judged under; "mentions" describes eligibility,
+        # and eligibility is not part of the classifier's vocabulary.
+        mentions_only = space_tier == MENTIONS_TIER
+        tier_hint = "p2" if mentions_only else space_tier
 
         attempted += 1
         watched_thread_ids = set(watched_space_threads.get(space["id"], []))
@@ -181,11 +196,17 @@ def collect(
                 continue
             if (msg.get("personEmail") or "").lower() == my_email.lower():
                 continue
-            candidates.append(
-                to_candidate(
-                    msg, space, tier_hint, prefs, my_email, my_names, watched_thread_ids
-                )
+            candidate = to_candidate(
+                msg, space, tier_hint, prefs, my_email, my_names, watched_thread_ids
             )
+            # Filtered on the built candidate rather than on the raw message, so
+            # the @mention rule is `mentions_ben` itself (word-boundary matched
+            # and already tested) and not a second, looser copy of it.
+            if mentions_only and not (
+                candidate["is_direct_mention"] or candidate["is_watchlist"]
+            ):
+                continue
+            candidates.append(candidate)
 
     if failed:
         return candidates, (

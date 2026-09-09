@@ -39,7 +39,7 @@ def test_tier_of_is_case_and_whitespace_insensitive():
     prefs = parse_prefs(PREFS)
     assert prefs.tier_of("  C3 + CUI  ") == "p1"
     assert prefs.tier_of("scc - cii discussion") == "p2"
-    assert prefs.tier_of("Duo PM Sync") == "unlisted"
+    assert prefs.tier_of("  duo PM sync ") == "mentions"
     assert prefs.tier_of("Something Nobody Listed") == "unlisted"
 
 
@@ -69,4 +69,55 @@ def test_missing_sections_yield_empty_sets_not_errors():
     prefs = parse_prefs("# Empty\n")
     assert prefs.p1 == set()
     assert prefs.p2 == set()
+    assert prefs.mentions == set()
     assert prefs.watchlist == {}
+
+
+# --- F4: "Mentions only" was indistinguishable from "Never scan" -----------
+#
+# The Hub's watch form offers four destinations and writes all four. parse_prefs
+# knew three, so `## Mentions Only` resolved to "unlisted", space_is_eligible
+# said no, and a direct @mention there was never fetched. Ben demotes a noisy
+# channel expecting @mentions still to reach him and instead goes invisible in
+# it, with sources.webex: "ok" every hour.
+
+
+def test_the_mentions_only_section_is_parsed_as_its_own_tier():
+    prefs = parse_prefs(PREFS)
+    assert prefs.mentions == {"duo pm sync"}
+
+
+def test_never_scan_stays_unlisted_because_that_is_what_it_means():
+    """Never Scan is deliberately NOT a tier: "unlisted" already means "do not
+    fetch", so parsing it would only create a second name for one behaviour.
+    """
+    prefs = parse_prefs(PREFS)
+    assert prefs.tier_of("Social / watercooler channels") == "unlisted"
+
+
+def test_a_channel_listed_twice_takes_the_louder_tier():
+    """Precedence has to be explicit, or a stale duplicate left behind by a Hub
+    "move" silently demotes a P1 channel to mentions-only.
+    """
+    prefs = parse_prefs("""
+### Priority 1 — Interrupt Me
+- C3 + CUI
+
+### Priority 2 — Tagged Only
+- C3 + CUI
+
+## Mentions Only
+- C3 + CUI
+""")
+    assert prefs.tier_of("C3 + CUI") == "p1"
+
+
+def test_mentions_beats_nothing_but_loses_to_p2():
+    prefs = parse_prefs("""
+### Priority 2 — Tagged Only
+- Duo PM Sync
+
+## Mentions Only
+- Duo PM Sync
+""")
+    assert prefs.tier_of("Duo PM Sync") == "p2"
