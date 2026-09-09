@@ -560,7 +560,6 @@ git commit -m "docs: record the preferences.md tier migration (file itself is gi
   - `next_briefing_at(now_local: datetime) -> tuple[str, str]` → `("today 16:00", "a few hours")` or `("tomorrow 08:30", "overnight")`
   - `load_state(path: str, today: str) -> dict` → `{"day": str, "seen": {id: {...}}}`
   - `save_state(path: str, state: dict) -> None`
-  - `select_new(candidates, state) -> tuple[list, list]` → `(newly_seen, already_seen)`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -576,7 +575,6 @@ from lib.pulse_state import (
     next_briefing_at,
     load_state,
     save_state,
-    select_new,
 )
 
 UTC = timezone.utc
@@ -673,13 +671,6 @@ def test_save_then_load_round_trips(tmp_path):
     assert load_state(path, "2026-09-09")["seen"]["a"]["tier"] == "panel"
 
 
-def test_select_new_splits_on_the_seen_store():
-    state = {"day": "2026-09-09", "seen": {}}
-    first = _cand(text="one")
-    state["seen"][fingerprint(first)] = {"first_seen": "earlier"}
-    fresh, old = select_new([first, _cand(text="two")], state)
-    assert [c["text"] for c in fresh] == ["two"]
-    assert [c["text"] for c in old] == ["one"]
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -782,21 +773,12 @@ def save_state(path: str, state: dict) -> None:
     os.replace(tmp, path)
 
 
-def select_new(candidates: list[dict], state: dict) -> tuple[list[dict], list[dict]]:
-    """Split candidates into never-seen-today and already-seen-today."""
-    fresh, already = [], []
-    for candidate in candidates:
-        if fingerprint(candidate) in state["seen"]:
-            already.append(candidate)
-        else:
-            fresh.append(candidate)
-    return fresh, already
 ```
 
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `cd ~/projects/webex-agent && .venv/bin/python3.12 -m pytest tests/test_pulse_state.py -v`
-Expected: PASS, 15 tests.
+Expected: PASS, 14 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1134,7 +1116,7 @@ git commit -m "feat: Webex candidate collection with tier and mention detection"
   - `classify_sender(msg, prefs, my_email) -> str` → `"keep" | "slack_panel" | "drop"`
   - `parse_slack_notification(msg) -> dict | None`
   - `to_candidate(msg, disposition) -> dict`
-  - `collect(since, prefs, my_email, runner=...) -> tuple[list[dict], str]` → `(candidates, source_status)`
+  - `collect(since_iso, prefs, my_email, runner=...) -> tuple[list[dict], str]` → `(candidates, source_status)`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1674,7 +1656,7 @@ git commit -m "feat: imminent-meeting detection for the pulse trigger"
 - Test: `tests/test_pulse_classify.py`
 
 **Interfaces:**
-- Consumes: `PulsePrefs` (Task 2), `next_briefing_at` (Task 4)
+- Consumes: the raw `preferences.md` text as `prefs_text: str` (not a `PulsePrefs`), and `next_briefing_at` (Task 4)
 - Produces:
   - `MODEL_BEDROCK: str`, `MODEL_DIRECT: str`
   - `build_prompt(candidates, prefs_text, now_iso, briefing_label, briefing_horizon, meetings) -> str`
@@ -2769,7 +2751,7 @@ Expected: PASS, 11 tests.
 - [ ] **Step 5: Run the whole suite**
 
 Run: `cd ~/projects/webex-agent && .venv/bin/python3.12 -m pytest tests/ -v`
-Expected: PASS, 106 tests (1 + 7 + 15 + 16 + 17 + 6 + 12 + 13 + 8 + 11).
+Expected: PASS, 105 tests (1 + 7 + 14 + 16 + 17 + 6 + 12 + 13 + 8 + 11).
 
 - [ ] **Step 6: Commit**
 
