@@ -1,0 +1,30 @@
+P1:
+ - c3 + cui
+ - duo + access manager + meraki end users
+ - identity app for c3 ga
+ - identity fabric/cui dependencies
+ - identity in cloud control working group
+ - mini ec with cui
+ - pca - cisco identity fabric (meraki access manager) pki
+ - pureca identity fabric
+P2:
+ - ai canvas, uaia, c3 - product integration execution (pm/eng)
+ - cii + duo - support scope and case routing project
+ - cloud control and identity provisioning
+ - duo/ cii in india scc needs
+ - help-identity-security-intelligence - join: https://eurl.io/#fzk_yt17m
+ - ia sprint — fabric folks
+ - identity fabric requirements
+ - identity fabric strategy & planning
+ - scc - cii discussion
+Watchlist:
+ - Dros Adamson <androsa@cisco.com>
+ - Aamir Yousufzai <ayousufz@cisco.com>
+ - Einar Nilsen-Nygaard <einarnn@cisco.com>
+ - Brian Lindauer <lindauer@cisco.com>
+ - Matt Caulfield <mcaulfie@cisco.com>
+ - Rory Scott <rorscott@cisco.com>
+ - Shyam Srinivasan <shysrini@cisco.com>
+ - Tal Surasky <surasky@cisco.com>
+ - Vinita Karbhari <vkarbhar@cisco.com>
+ - Didi Dotan <ydotan@cisco.com>
