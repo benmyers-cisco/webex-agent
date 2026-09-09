@@ -1,6 +1,6 @@
 # Hourly Pulse — Design
 
-**Status:** DRAFT — pending Ben's review
+**Status:** APPROVED — cycle 1 ready to plan
 **Author:** Nigel Watters (chief of staff agent), with Ben Myers
 **Date:** 2026-09-09
 **Scope:** Cycle 1 only. Cycles 2 and 3 sketched at the end.
@@ -85,7 +85,8 @@ Stored as `- Name <email>` because Webex messages carry `personEmail`, not displ
 resolved with `msgraph resolve-person`.
 
 Cycle 1 watchlist: Taylor · Didi Dotan · Brian Lindauer · Rory Scott · Dros Adamson ·
-Shyam Srinivasan · Einar Nilsen-Nygaard · Aamir Yousufzai · Matt · Vinita Karbhari · Tal Surasky.
+Shyam Srinivasan · Einar Nilsen-Nygaard · Aamir Yousufzai · Matt Caulfield · Vinita Karbhari ·
+Tal Surasky.
 
 **Mentees are deliberately excluded** (Adam Greer, Sam Betlej, Abdul, Devon, Ethan) — decided
 2026-09-09. They are lower-urgency and belong in the 4pm briefing.
@@ -135,10 +136,11 @@ These sit in the panel, silent, and are the cases Ben named directly:
 - Anything where Ben sent the last message
 - Status updates, FYIs, shared documents
 
-### Channel split — [TBD: Ben to red-line]
+### Channel split — approved 2026-09-09
 
-Proposed cut from 13 P1 channels to 8. Thirteen channels that all interrupt is not a priority tier.
-This is a judgment about which channels earn an interrupt and needs Ben's correction.
+Cut from 13 P1 channels to 8. Thirteen channels that all interrupt is not a priority tier. The four
+demoted channels keep full daily-triage coverage; they simply no longer interrupt mid-day, and any of
+them can be promoted in cycle 2 once a week of real data exists.
 
 **P1 — notify (8):** C3 + CUI · Identity in Cloud Control Working Group · Identity Fabric/CUI
 Dependencies · Mini EC with CUI · Identity App for C3 GA · PCA - Cisco Identity Fabric (Meraki
@@ -258,7 +260,13 @@ the reason is worth a comment in the code.
 2. **Webex** — fetch P1 channels, P2 channels, DMs, group chats, and watched threads.
 3. **Email** — `msgraph email search "received>=<window>"`. Keep mail where Ben is in To or Cc from
    a human sender, plus anything from a watchlist sender. Hard-exclude calendar accept/decline
-   notices, Slack notification emails, distribution-list blasts, and automated senders.
+   notices, distribution-list blasts, and automated senders.
+
+   **One deliberate exception:** Slack DM and direct-mention notification emails from
+   `notification@slack.com` are parsed and shown in the panel's silent section — **never priority**.
+   They represent real human messages (Yizhen Shi's 2026-09-08 walk-through DM arrived this way) and
+   they are the only Slack visibility available until the app is approved in cycle 3. The sender is
+   automated, so they can never clear the priority bar; the exception is display-only.
 4. **Calendar** — today's events for the meeting-imminent trigger.
 5. One Bedrock call per source bundle, classifying each candidate `priority | panel | drop` with a
    reason and a draft reply.
@@ -395,25 +403,17 @@ and the same bar. See Open Question 5 for the interim question about Slack notif
 
 ## Open questions
 
-1. **[TBD] The P1/P2 channel split.** Proposed above, cut from 13 to 8. Ben to red-line.
-2. **Replying from the Hub panel — cycle 1 or cycle 2?** Recommendation: cycle 2. Reading and
-   triaging is the bottleneck, not typing, and a send path that misfires into a P1 channel is a
-   much worse failure than a panel you have to click out of. This is a scope call, not a technical
-   one.
-3. **"Matt" on the watchlist needs a surname and an email.** Likely Matt from the Identity Fabric
-   architecture reviews; unverified. Do not resolve by guess.
-4. **Working-hours envelope.** Assumed 09:15–17:15 weekdays, nine runs, derived from the existing
-   triage schedule rather than stated. Confirm — particularly whether the last run should be later.
+All cycle-1 blocking questions were resolved on 2026-09-09. What remains:
 
-5. **Slack notification emails as an interim bridge.** Slack already emails Ben's Outlook inbox when
-   he gets a DM or mention — that is how Yizhen Shi's 2026-09-08 message about the walk-through
-   arrived. Those come from `notification@slack.com`, an automated sender, so the cycle-1 email
-   filter excludes them outright.
-
-   Recommendation: surface Slack **DM and direct-mention** notification emails in the panel's silent
-   section, never as priority. It is real human content and it costs almost nothing to parse. But it
-   is a deliberate exception to "human senders only," so it needs Ben's call rather than a quiet
-   inclusion. If he declines, cycle 1 has no Slack coverage at all and that is a clean answer.
+1. **Watchlist emails are unresolved.** Eleven names, no addresses yet. Webex matches on
+   `personEmail`, so every name must go through `msgraph resolve-person` before the watchlist does
+   anything. A name that fails to resolve must **fail loudly at startup**, not silently match
+   nothing — that is the same failure mode as an unresolved space title in `preferences.md`.
+   "Taylor" in particular is a first name only and may be ambiguous.
+2. **Working-hours envelope.** 09:15–17:15 weekdays, nine runs, derived from the existing triage
+   schedule rather than stated by Ben. Worth confirming once he sees it running — particularly
+   whether the last run should be later than 17:15.
+3. **Meeting-imminent lookahead** is set at two hours by assumption. A tuning knob for cycle 2.
 
 ---
 
@@ -436,3 +436,7 @@ and the same bar. See Open Question 5 for the interim question about Slack notif
 | 2026-09-09 | Approach A — standalone `hourly_pulse.py`, not a mode on `daily_summary.py` | Nigel proposed, Ben accepted |
 | 2026-09-09 | Log panel-tier items in cycle 1 so cycle 2 can measure recall, not just precision | Nigel |
 | 2026-09-09 | The bar is "can this wait until the *next* briefing," so it rises after 16:00 | Nigel, from spec self-review |
+| 2026-09-09 | P1 cut from 13 channels to 8; the other 4 keep daily-triage coverage | Nigel proposed, Ben approved |
+| 2026-09-09 | Matt Caulfield on the watchlist. Matt Miller not. | Ben |
+| 2026-09-09 | Panel is read-only in cycle 1; replying moves to cycle 2 | Nigel recommended, Ben approved |
+| 2026-09-09 | Slack notification emails: panel-only, never priority | Nigel, Ben deferred the call |
