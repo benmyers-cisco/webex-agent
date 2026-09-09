@@ -251,3 +251,37 @@ def test_classify_degrades_to_all_panel_never_raises(client_cls):
 def test_classify_degrade_reports_the_failure_in_why():
     out = classify(_RaisingClient(), CANDIDATES, "prefs", "n", "today 16:00", "a few hours", [])
     assert any("fail" in item["why"].lower() for item in out)
+
+
+# --- classification_failed marker: machine-readable, additive-only ---
+
+@pytest.mark.parametrize("client_cls", [
+    _RaisingClient, _EmptyContentClient, _WeirdShapeClient, _GarbageTextClient,
+])
+def test_classify_degrade_sets_classification_failed_marker_on_every_item(client_cls):
+    out = classify(client_cls(), CANDIDATES, "prefs", "n", "today 16:00", "a few hours", [])
+    assert len(out) == len(CANDIDATES)
+    assert all(item.get("classification_failed") is True for item in out)
+
+
+def test_classify_success_never_carries_the_classification_failed_key():
+    class _OkClient:
+        class _Block:
+            text = json.dumps({"items": [
+                {"index": 0, "tier": "priority", "why": "x"},
+                {"index": 1, "tier": "panel", "why": "y"},
+            ]})
+
+        class messages:
+            @staticmethod
+            def create(**kw):
+                class Response:
+                    pass
+                resp = Response()
+                resp.content = [_OkClient._Block()]
+                return resp
+
+    out = classify(_OkClient(), CANDIDATES, "prefs", "n", "today 16:00", "a few hours", [])
+    assert len(out) == len(CANDIDATES)
+    for item in out:
+        assert "classification_failed" not in item

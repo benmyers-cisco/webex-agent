@@ -198,6 +198,7 @@ def classify(client, candidates, prefs_text, now_iso, briefing_label, briefing_h
         )
         return [
             {"tier": "panel", "trigger": candidate.get("tier_hint", "unknown"),
-             "why": f"Classification failed: {exc}", "draft_reply": None}
+             "why": f"Classification failed: {exc}", "draft_reply": None,
+             "classification_failed": True}
             for candidate in candidates
         ]
