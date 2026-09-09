@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -27,9 +28,39 @@ def test_prompt_states_the_actual_test_verbatim():
     assert "a few hours" in prompt
 
 
-def test_prompt_carries_the_watchlist_flag_per_candidate():
-    prompt = build_prompt(CANDIDATES, "prefs", "n", "today 16:00", "a few hours", [])
-    assert "WATCHLIST" in prompt
+def _candidate_block(prompt: str, index: int) -> str:
+    """Slice out just one candidate's rendered block, so flag assertions
+    can't be satisfied by the static rule text elsewhere in the prompt."""
+    marker = f"[{index}] "
+    start = prompt.index(marker) + len(marker)
+    rest = prompt[start:]
+    next_marker = re.search(r"\n\[\d+\] ", rest)
+    end = next_marker.start() if next_marker else rest.find("\nRespond with JSON only")
+    if end == -1:
+        end = len(rest)
+    return rest[:end]
+
+
+# Candidate 0 has every flag; candidate 1 has none — lets each test assert
+# both presence (in the flagged block) and absence (in the unflagged one).
+FLAG_CANDIDATES = [
+    {
+        "channel": "X", "from_name": "A", "from_email": "a@cisco.com", "at": "n",
+        "text": "flagged", "is_watchlist": True, "is_direct_mention": True,
+        "is_watched_thread": True, "tier_hint": "p1", "source": "webex",
+    },
+    {
+        "channel": "Y", "from_name": "B", "from_email": "b@cisco.com", "at": "n",
+        "text": "unflagged", "is_watchlist": False, "is_direct_mention": False,
+        "is_watched_thread": False, "tier_hint": "p2", "source": "webex",
+    },
+]
+
+
+def test_prompt_carries_the_watchlist_flag_within_its_own_candidate_block_only():
+    prompt = build_prompt(FLAG_CANDIDATES, "prefs", "n", "today 16:00", "a few hours", [])
+    assert "WATCHLIST" in _candidate_block(prompt, 0)
+    assert "WATCHLIST" not in _candidate_block(prompt, 1)
 
 
 def test_prompt_numbers_candidates_so_responses_can_be_matched_back():
@@ -113,15 +144,14 @@ def test_prompt_contains_candidate_text_and_prefs_text():
     assert "PREFS_SENTINEL_XYZ" in prompt
 
 
-def test_prompt_carries_direct_mention_and_watched_thread_flags():
-    flagged = [{
-        "channel": "C3 + CUI", "from_name": "X", "from_email": "x@cisco.com",
-        "at": "n", "text": "hi", "is_watchlist": False, "is_direct_mention": True,
-        "is_watched_thread": True, "tier_hint": "p2", "source": "webex",
-    }]
-    prompt = build_prompt(flagged, "prefs", "n", "today 16:00", "a few hours", [])
-    assert "DIRECT-MENTION" in prompt
-    assert "THREAD-YOU-ARE-IN" in prompt
+def test_prompt_carries_direct_mention_and_watched_thread_flags_within_their_own_block_only():
+    prompt = build_prompt(FLAG_CANDIDATES, "prefs", "n", "today 16:00", "a few hours", [])
+    flagged_block = _candidate_block(prompt, 0)
+    unflagged_block = _candidate_block(prompt, 1)
+    assert "DIRECT-MENTION" in flagged_block
+    assert "THREAD-YOU-ARE-IN" in flagged_block
+    assert "DIRECT-MENTION" not in unflagged_block
+    assert "THREAD-YOU-ARE-IN" not in unflagged_block
 
 
 def test_prompt_renders_with_no_candidates_and_no_meetings():
