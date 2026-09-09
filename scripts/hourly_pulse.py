@@ -49,6 +49,9 @@ LAST_RUN_PATH = os.path.join(REPO, ".last_pulse_run")
 MY_EMAIL = "benmyers@cisco.com"
 MY_NAMES = ["Ben Myers", "Myers, Ben"]
 
+# No real UTC offset exceeds this (Pacific/Kiritimati is +14).
+MAX_OFFSET_HOURS = 14
+
 # The classifier catches every exception internally and comes back with
 # all-panel verdicts flagged classification_failed, so a model outage arrives
 # here as data, not as a raised exception. A run where the model was down but
@@ -63,7 +66,12 @@ CLASSIFIER_DEGRADED = (
 def run(deps: dict) -> dict:
     now = deps["now"]
     now_iso = now.isoformat()
-    local_now = now + timedelta(hours=deps["tz_offset_hours"])
+    # Coerced, not trusted. This runs BEFORE the guard below is in scope — that
+    # ordering is required, since the guard needs now_iso and today to write
+    # anything at all — so an unusable offset here would raise with no artifact
+    # written, which is the one outcome this whole design exists to prevent.
+    offset_hours = _coerce_offset_hours(deps.get("tz_offset_hours"))
+    local_now = now + timedelta(hours=offset_hours)
     today = local_now.strftime("%Y-%m-%d")
 
     # Broad on purpose. The source and output modules degrade rather than raise,
@@ -71,7 +79,7 @@ def run(deps: dict) -> dict:
     # a non-dict verdict, a corrupted seen store that loads as a string), and
     # every one of those must still leave an artifact saying the run failed.
     try:
-        return _run(deps, now, now_iso, local_now, today)
+        return _run(deps, now, now_iso, local_now, today, offset_hours)
     except Exception as exc:  # noqa: BLE001 — see rule 1 in the module docstring
         reason = f"{type(exc).__name__}: {exc}"
         print(f"ERROR: pulse run failed ({reason})", file=sys.stderr)
@@ -81,12 +89,15 @@ def run(deps: dict) -> dict:
         return payload
 
 
-def _run(deps: dict, now, now_iso: str, local_now, today: str) -> dict:
+def _run(deps: dict, now, now_iso: str, local_now, today: str, offset_hours: float) -> dict:
     pulse_output.archive_if_new_day(deps["output_dir"], today)
     prefs = parse_prefs(deps["prefs_text"])
     state = pulse_state.load_state(deps["state_path"], today)
+    # The coerced offset, not deps["tz_offset_hours"]: the window's 08:30 floor
+    # and the day boundary above must agree, or the first run of a day scans a
+    # window the seen store was not reset for.
     window_from = pulse_state.pulse_window(
-        _read(deps["last_run_path"]), now, deps["tz_offset_hours"]
+        _read(deps["last_run_path"]), now, offset_hours
     )
     briefing_label, briefing_horizon = pulse_state.next_briefing_at(local_now)
 
@@ -181,6 +192,43 @@ def _read(path: str) -> str | None:
 def _write(path: str, value: str) -> None:
     with open(path, "w") as fh:
         fh.write(value)
+
+
+def _coerce_offset_hours(value) -> float:
+    """A usable UTC offset in hours, or 0.0 (UTC) if `value` is not one.
+
+    Degrade, never raise. This is called before ruling 35's guard can cover
+    anything, because the guard needs `today` in order to write a failure
+    artifact at all — so raising here produces NO artifact, and silence reads as
+    a quiet hour. UTC is the right fallback under "omission must never
+    escalate": a day boundary off by hours shifts when the artifact archives and
+    when the seen store resets, which is visible and harmless, and it cannot
+    promote anything to `priority`. Writing nothing is neither.
+
+    Unreachable from main(), which builds this from _local_offset_hours(). It
+    exists because the constraint is unconditional and because deps is a
+    public-ish seam with more than one caller.
+    """
+    try:
+        offset = float(value)
+    except (TypeError, ValueError):
+        print(
+            f"WARNING: unusable tz_offset_hours {value!r}; "
+            "falling back to UTC for the local day boundary",
+            file=sys.stderr,
+        )
+        return 0.0
+
+    # NaN and infinity are floats that make timedelta() raise, and a real UTC
+    # offset never exceeds 14 hours (Pacific/Kiritimati).
+    if offset != offset or abs(offset) > MAX_OFFSET_HOURS:
+        print(
+            f"WARNING: tz_offset_hours {value!r} is not a real UTC offset; "
+            "falling back to UTC for the local day boundary",
+            file=sys.stderr,
+        )
+        return 0.0
+    return offset
 
 
 def _local_offset_hours(now: datetime | None = None) -> float:

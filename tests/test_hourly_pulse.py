@@ -4,6 +4,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from hourly_pulse import run
 
 UTC = timezone.utc
@@ -172,9 +174,24 @@ def test_no_pulse_module_references_the_shared_state_files():
     """
     forbidden_names = ("save_run_timestamp", "save_watched_threads", "prune_watched_threads")
 
+    # hourly_pulse.py plus the eight lib/pulse_*.py modules. Hardcoded on
+    # purpose, and NOT len(list(glob(...))): a count derived the same way the
+    # scan derives it agrees with a broken glob and the guard stays green while
+    # protecting nothing. `assert sources` was a tautology for the same reason —
+    # the first element is hardcoded, so it could never fire. A rename or a
+    # move must break this test loudly, because what it guards is .last_run,
+    # the daily briefing's watermark.
+    expected_module_count = 9
+
     scripts = Path(__file__).resolve().parent.parent / "scripts"
     sources = [scripts / "hourly_pulse.py", *sorted((scripts / "lib").glob("pulse_*.py"))]
-    assert sources, "no pulse sources found — check the path"
+    assert len(sources) == expected_module_count, (
+        f"guard scanned {len(sources)} module(s), expected {expected_module_count}: "
+        f"{[p.name for p in sources]}. Either a pulse module moved or was renamed "
+        f"(update this count deliberately), or the glob broke and this guard is vacuous."
+    )
+    for path in sources:
+        assert path.exists(), f"{path} does not exist — the guard would scan nothing"
 
     for path in sources:
         tree = ast.parse(path.read_text())
@@ -457,6 +474,58 @@ def test_the_local_offset_is_the_offset_in_effect_right_now():
 
     expected = dt.now().astimezone().utcoffset().total_seconds() / 3600
     assert _local_offset_hours() == expected
+
+
+@pytest.mark.parametrize("bad", [
+    "not a number", None, float("nan"), float("inf"), float("-inf"), 99999, [], object(),
+])
+def test_a_malformed_timezone_offset_still_writes_an_artifact(tmp_path, bad):
+    """The offset is consumed before ruling 35's guard can cover anything — the
+    guard needs `today` to write a failure artifact at all. So an unusable
+    offset must degrade, not raise: raising leaves no artifact, and no artifact
+    reads as a quiet hour.
+    """
+    payload = run(_deps(tmp_path, tz_offset_hours=bad))
+
+    on_disk = json.load(open(tmp_path / "output" / "pulse.json"))
+    assert "status" in on_disk
+    assert on_disk["status"] == "ok"
+    assert payload["status"] == "ok"
+    assert on_disk["items"][0]["tier"] == "priority"
+
+
+def test_a_malformed_offset_is_loud_on_stderr(tmp_path, capsys):
+    run(_deps(tmp_path, tz_offset_hours="nonsense"))
+    assert "tz_offset_hours" in capsys.readouterr().err
+
+
+def test_a_malformed_offset_falls_back_to_the_utc_day_boundary(tmp_path):
+    """UTC is the fallback because it cannot escalate anything: a day boundary
+    off by hours only shifts when the artifact archives and the seen store
+    resets. This pins that the fallback is really UTC and not the good offset,
+    using a time where the two disagree about the date.
+    """
+    late = datetime(2026, 9, 9, 2, 15, 3, tzinfo=UTC)  # 22:15 on 09-08 at -4
+
+    good_dir = tmp_path / "good"
+    good_dir.mkdir()
+    assert run(_deps(good_dir, now=late))["day"] == "2026-09-08"
+
+    bad_dir = tmp_path / "bad"
+    bad_dir.mkdir()
+    assert run(_deps(bad_dir, now=late, tz_offset_hours="nonsense"))["day"] == "2026-09-09"
+
+
+def test_a_valid_offset_is_still_honoured(tmp_path):
+    """The coercion must not flatten every offset to UTC — that would silently
+    move the day boundary for a correct caller.
+    """
+    late = datetime(2026, 9, 9, 2, 15, 3, tzinfo=UTC)
+    assert run(_deps(tmp_path, now=late, tz_offset_hours=-4))["day"] == "2026-09-08"
+
+    other = tmp_path / "other"
+    other.mkdir()
+    assert run(_deps(other, now=late, tz_offset_hours=5.5))["day"] == "2026-09-09"
 
 
 def test_the_local_offset_follows_dst_rather_than_the_build_time_flag():
