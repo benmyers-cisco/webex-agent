@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 DAY_FLOOR_HOUR = 8
@@ -74,6 +75,11 @@ def load_state(path: str, today: str) -> dict:
         with open(path) as fh:
             state = json.load(fh)
     except (OSError, ValueError):
+        print(
+            f"WARNING: could not parse pulse state file {path}; "
+            "treating as empty and may re-notify items already sent",
+            file=sys.stderr,
+        )
         return empty
     if not isinstance(state, dict) or state.get("day") != today:
         return empty

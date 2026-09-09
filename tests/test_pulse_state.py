@@ -72,9 +72,10 @@ def test_next_briefing_is_tomorrow_morning_at_or_after_1600_local():
     assert horizon == "overnight"
 
 
-def test_state_loads_empty_when_the_file_is_absent(tmp_path):
+def test_state_loads_empty_when_the_file_is_absent(tmp_path, capsys):
     state = load_state(str(tmp_path / "nope.json"), "2026-09-09")
     assert state == {"day": "2026-09-09", "seen": {}}
+    assert capsys.readouterr().err == ""
 
 
 def test_state_resets_when_the_day_changed(tmp_path):
@@ -95,6 +96,16 @@ def test_state_resets_rather_than_crashing_on_corrupt_json(tmp_path):
     path = tmp_path / "seen.json"
     path.write_text("{not json")
     assert load_state(str(path), "2026-09-09") == {"day": "2026-09-09", "seen": {}}
+
+
+def test_state_warns_on_stderr_when_the_file_is_corrupt(tmp_path, capsys):
+    path = tmp_path / "seen.json"
+    path.write_text("{not json")
+    state = load_state(str(path), "2026-09-09")
+    assert state == {"day": "2026-09-09", "seen": {}}
+    err = capsys.readouterr().err
+    assert str(path) in err
+    assert "WARNING" in err
 
 
 def test_save_then_load_round_trips(tmp_path):
