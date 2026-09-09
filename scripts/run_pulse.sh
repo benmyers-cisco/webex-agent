@@ -10,9 +10,15 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="$PROJECT_DIR/output"
-# Overridable only so the ruling-37 freshness test can force hourly_pulse.py to
-# fail without writing its own artifact. Nothing sets this in normal operation.
-PYTHON="${PYTHON:-$PROJECT_DIR/.venv/bin/python3.12}"
+# Hardcoded, not overridable. An inherited PYTHON would silently swap the
+# interpreter — the same class of foot-gun scrub_inherited_credentials exists
+# to prevent — and it is also the most direct way to cause the exact failure
+# this wrapper exists to handle (see write_failure's UNREPORTABLE branch
+# below). Per the plan's Global Constraints, the interpreter is always
+# .venv/bin/python3.12 from the repo root; there is no legitimate reason for
+# this to vary. If a test needs hourly_pulse.py to fail, stub the script or
+# point PROJECT_DIR's contents at a sandbox — never override the interpreter.
+PYTHON="$PROJECT_DIR/.venv/bin/python3.12"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 
@@ -21,19 +27,38 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/opt/python@3.12/bin:/usr/local/bin:
 # The pulse's own failure artifact, in the same shape hourly_pulse.py uses, so
 # the Hub needs no special case.
 #
-# Two departures from a naive re-implementation:
+# Three departures from a naive re-implementation:
 #  - Imports failure_payload from the project's own scripts/lib/pulse_output.py
 #    rather than re-declaring the JSON shape inline, so the two writers cannot
 #    drift out of sync with each other. The day is taken from the LOCAL clock
 #    (datetime.now().astimezone()), not UTC, because archive_if_new_day
 #    compares against a locally-derived `today` — a naive UTC stamp would tag
-#    an evening failure after 20:00 EDT with tomorrow's date.
-#  - Renders to pulse.json.tmp and mv's into place only once python exits 0,
-#    rather than redirecting python's stdout straight at pulse.json. A plain
-#    `> pulse.json` truncates the target the instant the shell opens it, before
-#    python runs at all — so if python itself fails to import or write, the
-#    artifact left behind is a destroyed, zero-byte file instead of whatever
-#    was there before.
+#    an evening failure after 20:00 EDT with tomorrow's date, and on the NEXT
+#    day's run archive_if_new_day would see day != today and move it aside —
+#    "misfile" undersold it; the UTC version gets deleted from the live path.
+#  - Renders to pulse.json.WRAPPER-TMP (a name distinct from the
+#    pulse.json.tmp that pulse_output.write_payload itself uses) and mv's into
+#    place only once python exits 0, rather than redirecting python's stdout
+#    straight at pulse.json. A plain `> pulse.json` truncates the target the
+#    instant the shell opens it, before python runs at all — so if python
+#    itself fails to import or write, the artifact left behind is a destroyed,
+#    zero-byte file instead of whatever was there before. The distinct name
+#    also matters on its own: StartCalendarInterval deliberately permits
+#    overlapping runs, so two wrapper invocations (or a wrapper invocation
+#    racing hourly_pulse.py's own write) sharing "pulse.json.tmp" could
+#    collide, with one os.replace-ing the other's half-written render into
+#    place.
+#  - If the render itself cannot be produced — the interpreter runs but the
+#    import fails, e.g. a broken lib/pulse_state.py, which pulse_output.py
+#    imports and which is exactly the kind of bug that also makes
+#    hourly_pulse.py exit before writing anything — this must NOT leave a
+#    stale pre-existing pulse.json in place looking like the current hour.
+#    That would be a false positive: Ben reads last hour's real success as
+#    this hour's. So an un-renderable failure instead moves any existing
+#    pulse.json aside to pulse.json.unreportable and leaves nothing at the
+#    live path. A missing artifact is a gap the Hub already surfaces visibly;
+#    a stale one presented as current is a lie. No interpreter is required to
+#    do the `mv` — this is a plain shell test-and-move.
 #
 # Takes project_dir as an argument (rather than reading $PROJECT_DIR directly)
 # because this can fire before this script's own `cd "$PROJECT_DIR"` — the
@@ -41,7 +66,7 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/opt/python@3.12/bin:/usr/local/bin:
 write_failure() {
   local reason="$1" project_dir="$2"
   mkdir -p "$OUTPUT_DIR"
-  local tmp="$OUTPUT_DIR/pulse.json.tmp"
+  local tmp="$OUTPUT_DIR/pulse.json.wrapper-tmp"
   if "$PYTHON" - "$reason" "$project_dir" <<'PY' > "$tmp"
 import json, sys
 from datetime import datetime
@@ -58,7 +83,12 @@ PY
     log "wrote failure artifact to $OUTPUT_DIR/pulse.json"
   else
     rm -f "$tmp"
-    log "FATAL: could not even render the failure artifact (python failed to import or run) — leaving any existing pulse.json alone rather than truncate it"
+    if [ -e "$OUTPUT_DIR/pulse.json" ]; then
+      mv -f "$OUTPUT_DIR/pulse.json" "$OUTPUT_DIR/pulse.json.unreportable"
+      log "FATAL: could not render the failure artifact (python failed to import or run) — moved the existing pulse.json aside to pulse.json.unreportable rather than leave a stale artifact reading as current"
+    else
+      log "FATAL: could not render the failure artifact (python failed to import or run) — no pre-existing pulse.json to move aside; leaving nothing at the live path"
+    fi
   fi
 }
 
