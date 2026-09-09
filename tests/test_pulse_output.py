@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 from lib.pulse_output import (
     build_items,
     build_payload,
@@ -110,6 +112,35 @@ def test_archive_is_a_noop_within_the_same_day(tmp_path):
 
 def test_archive_is_a_noop_when_there_is_nothing_to_archive(tmp_path):
     assert archive_if_new_day(str(tmp_path), "2026-09-09") is None
+
+
+# --- write_payload's atomic-write guarantee ---
+
+def test_a_failed_write_leaves_the_previous_artifact_intact(tmp_path, monkeypatch):
+    out = str(tmp_path)
+    write_payload(
+        build_payload([], {"webex": "ok"}, NOW, NOW, NOW, notified=False, day="2026-09-08"),
+        out,
+    )
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("lib.pulse_output.json.dump", boom)
+    with pytest.raises(RuntimeError):
+        write_payload(
+            build_payload([], {}, NOW, NOW, NOW, notified=False, day="2026-09-09"), out
+        )
+
+    surviving = json.load(open(os.path.join(out, "pulse.json")))
+    assert surviving["day"] == "2026-09-08"
+
+
+def test_a_successful_write_leaves_no_tmp_file_behind(tmp_path):
+    out = str(tmp_path)
+    write_payload(build_payload([], {"webex": "ok"}, NOW, NOW, NOW, notified=False), out)
+    leftovers = [f for f in os.listdir(out) if f.endswith(".tmp")]
+    assert leftovers == []
 
 
 # --- Ruling 1: build_items must not silently truncate on a short verdicts list ---
