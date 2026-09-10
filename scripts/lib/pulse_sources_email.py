@@ -39,6 +39,37 @@ AUTOMATED_SENDERS: frozenset[str] = frozenset({
 })
 AUTOMATED_LOCALPARTS = ("noreply", "no-reply", "donotreply", "do-not-reply", "notifications")
 
+# Bulk mail: newsletters, vendor marketing, webinar invitations. These arrive
+# from addresses that look human enough to pass _is_automated — "sahil@
+# coderabbit.ai", "hello@emails.paloaltonetworks.com" — and the msgraph CLI
+# returns no recipient fields, so the inbox-presence rule below waves them all
+# through. They were the bulk of what the panel was showing.
+#
+# Two signals, both structural rather than guesses about content:
+#
+# 1. A local part that names a mailing function rather than a person. Kept
+#    narrow on purpose: "support", "sales" and "team" are excluded because a
+#    real person can be behind them and being wrong there costs Ben a message.
+# 2. An ESP sending subdomain. Marketing platforms send from a dedicated
+#    subdomain so campaign bounces cannot poison the corporate domain's
+#    reputation — "emails.paloaltonetworks.com", "info.gestore.com". A
+#    two-label domain is never matched, so "email.com" is safe.
+BULK_LOCALPARTS: frozenset[str] = frozenset({
+    "newsletter", "newsletters", "news", "marketing", "promo", "promotions",
+    "offers", "deals", "digest", "updates", "webinar", "webinars", "events",
+    "community", "invite", "invites", "hello", "info",
+})
+BULK_SUBDOMAINS: frozenset[str] = frozenset({
+    "email", "emails", "mail", "mailer", "mailing", "e", "em", "info", "news",
+    "links", "link", "send", "sendgrid", "mkt", "marketing", "go", "click",
+    "reply", "notify", "notifications", "campaign", "campaigns", "cmail",
+    "list", "lists",
+})
+# Never bulk-dropped by the rules above. Internal mail can absolutely be noise,
+# but it is the kind of noise that needs judgement rather than a pattern match —
+# so it goes to the classifier's relevance test instead of being cut here.
+CORPORATE_DOMAIN = "cisco.com"
+
 
 def _addr(node) -> str:
     if isinstance(node, dict):
@@ -61,6 +92,21 @@ def _is_automated(address: str) -> bool:
     return any(local.startswith(p) for p in AUTOMATED_LOCALPARTS)
 
 
+def is_bulk_sender(address: str) -> bool:
+    """A mailing-list or marketing sender rather than a person writing to Ben."""
+    if not address or "@" not in address:
+        return False
+    local, _, domain = address.partition("@")
+    if domain == CORPORATE_DOMAIN or domain.endswith("." + CORPORATE_DOMAIN):
+        return False
+    if local in BULK_LOCALPARTS:
+        return True
+    labels = domain.split(".")
+    # Three labels minimum: the subdomain has to be an addition to a registrable
+    # domain, so "mail.com" is not "mail" + "com".
+    return len(labels) >= 3 and labels[0] in BULK_SUBDOMAINS
+
+
 def classify_sender(msg: dict, prefs, my_email: str) -> str:
     """`keep` (priority-eligible), `slack_panel` (silent only), or `drop`."""
     sender = _addr(msg.get("from"))
@@ -75,9 +121,10 @@ def classify_sender(msg: dict, prefs, my_email: str) -> str:
     if not sender or sender == me:
         return "drop"
 
-    # Automated mail can never clear the bar, even if it is on the watchlist
-    # or addressed straight at Ben. This check must come before both.
-    if _is_automated(sender):
+    # Automated and bulk mail can never clear the bar, even if the address is on
+    # the watchlist or the mail is addressed straight at Ben. Both checks come
+    # before those rules for that reason.
+    if _is_automated(sender) or is_bulk_sender(sender):
         return "drop"
 
     # A watchlist sender is priority-eligible regardless of addressing.
@@ -206,7 +253,17 @@ def collect(since_iso: str, prefs, my_email: str, runner=_run_msgraph) -> tuple[
     in it cleared the bar), and that must stay distinguishable from a failure.
     """
     day = (since_iso or "")[:10]
-    args = ["email", "search", f"received>={day}", "--max", MAX_RESULTS, "--folder", "inbox"]
+    # Unread only. Reading a message is Ben's own signal that he has dealt with
+    # it, and replying marks it read too — so this one clause covers both "I've
+    # already seen this" and "I've already answered this", which is exactly what
+    # the pulse must not surface again. It is the same filter the 08:30 briefing
+    # uses, so the two surfaces agree about what counts as outstanding.
+    #
+    # The cost is real and worth stating: a message Ben opened and consciously
+    # left for later disappears from the panel. The panel is an interrupt
+    # surface, not a to-do list, and the briefings are where the backlog lives.
+    query = f"received>={day} AND isRead:false"
+    args = ["email", "search", query, "--max", MAX_RESULTS, "--folder", "inbox"]
 
     try:
         raw = runner(args)

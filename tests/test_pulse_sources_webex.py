@@ -514,3 +514,70 @@ def test_an_explicit_never_scan_listing_beats_the_group_chat_heuristic():
     space = {"title": "Sam Betlej, Adam Greer", "type": "group", "id": "n"}
     ok, tier = space_is_eligible(space, prefs, {})
     assert (ok, tier) == (False, "never")
+
+
+# --- Already answered ------------------------------------------------------
+# Webex exposes no read state for the authenticated user, so "Ben spoke after
+# it" is the only available evidence that he has dealt with a message. It is
+# also the stronger signal: a reply is action, a read receipt is only exposure.
+
+
+def test_a_message_ben_replied_to_is_not_surfaced():
+    spaces = [{"title": "C3 + CUI", "type": "group", "id": "p1-space"}]
+    messages = {
+        "p1-space": [
+            _msg("a@cisco.com", "can you confirm the cert date?", minutes_after_since=5),
+            _msg(MY_EMAIL, "yes, November", minutes_after_since=9),
+        ]
+    }
+    webex = FakeWebexClient(spaces, messages)
+    out, status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert out == []
+    assert status == "ok"
+
+
+def test_a_message_arriving_after_bens_last_word_still_surfaces():
+    # The half that matters most: replying earlier in the hour must not silence
+    # everything that lands afterwards.
+    spaces = [{"title": "C3 + CUI", "type": "group", "id": "p1-space"}]
+    messages = {
+        "p1-space": [
+            _msg("a@cisco.com", "old question", minutes_after_since=3),
+            _msg(MY_EMAIL, "answered", minutes_after_since=5),
+            _msg("a@cisco.com", "one more thing", minutes_after_since=9),
+        ]
+    }
+    webex = FakeWebexClient(spaces, messages)
+    out, _status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert [c["text"] for c in out] == ["one more thing"]
+
+
+def test_suppression_is_per_space():
+    # Ben answering in one space says nothing about another. Computing the
+    # cutoff once across every space would silence the whole run.
+    spaces = [
+        {"title": "C3 + CUI", "type": "group", "id": "p1-space"},
+        {"title": "Rory Scott", "type": "direct", "id": "dm"},
+    ]
+    messages = {
+        "p1-space": [_msg(MY_EMAIL, "answered here", minutes_after_since=9)],
+        "dm": [_msg("rorscott@cisco.com", "still waiting on you", minutes_after_since=5)],
+    }
+    webex = FakeWebexClient(spaces, messages)
+    out, _status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert [c["text"] for c in out] == ["still waiting on you"]
+
+
+def test_an_equal_timestamp_keeps_the_message_visible():
+    # Webex timestamps can tie, and a tie is no evidence Ben's reply came
+    # second. The safe reading of an ambiguous order is the visible one.
+    spaces = [{"title": "C3 + CUI", "type": "group", "id": "p1-space"}]
+    messages = {
+        "p1-space": [
+            _msg("a@cisco.com", "same second", minutes_after_since=5),
+            _msg(MY_EMAIL, "also same second", minutes_after_since=5),
+        ]
+    }
+    webex = FakeWebexClient(spaces, messages)
+    out, _status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
+    assert [c["text"] for c in out] == ["same second"]

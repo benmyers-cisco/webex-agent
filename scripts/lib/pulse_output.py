@@ -100,8 +100,27 @@ def build_items(candidates, verdicts, state, now_iso) -> list[dict]:
     return items
 
 
+def partition_dropped(items) -> tuple[list[dict], list[dict]]:
+    """Split `(kept, dropped)` on the classifier's relevance verdict.
+
+    Deliberately not folded into build_items. build_items' contract is that
+    every candidate becomes an item — that is what stops a truncated classifier
+    response from making messages vanish — and filtering inside it would make
+    "the item list is shorter than the candidate list" ambiguous between a
+    deliberate drop and the bug that invariant exists to catch.
+
+    The dropped list is returned rather than discarded so the count can reach the
+    panel. A filter that silently removes things is indistinguishable from a
+    quiet hour, which is the failure this whole design is built against.
+    """
+    kept, dropped = [], []
+    for item in items:
+        (dropped if item.get("tier") == "drop" else kept).append(item)
+    return kept, dropped
+
+
 def build_payload(items, sources, window_from, window_to, now_iso, notified,
-                  day=None, status="ok") -> dict:
+                  day=None, status="ok", filtered=0) -> dict:
     return {
         "generated_at": now_iso,
         # Ben's local day, passed in explicitly. now_iso[:10] is UTC and
@@ -114,6 +133,10 @@ def build_payload(items, sources, window_from, window_to, now_iso, notified,
         "window": {"from": window_from, "to": window_to},
         "sources": sources,
         "notified_this_run": bool(notified),
+        # How many candidates the relevance filter removed. Reported so an empty
+        # panel can say "nothing relevant came in, 14 filtered" rather than
+        # letting an aggressive filter pass for a quiet hour.
+        "filtered": int(filtered),
         "items": items,
     }
 
@@ -127,6 +150,9 @@ def failure_payload(reason: str, now_iso: str, day=None) -> dict:
         "window": None,
         "sources": {},
         "notified_this_run": False,
+        # Nothing was classified, so nothing was filtered. Present rather than
+        # absent so consumers never have to distinguish "zero" from "no key".
+        "filtered": 0,
         "items": [],
     }
 

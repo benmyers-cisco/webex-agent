@@ -151,9 +151,20 @@ def _run(deps: dict, now, now_iso: str, local_now, today: str, offset_hours: flo
         meetings=meetings,
     )
 
-    items = pulse_output.build_items(candidates, verdicts, state, now_iso)
+    all_items = pulse_output.build_items(candidates, verdicts, state, now_iso)
 
-    if any(item.get("classification_failed") for item in items):
+    # The relevance filter runs here rather than inside build_items, so that
+    # "fewer items than candidates" keeps its one meaning — see partition_dropped.
+    # A degraded classifier cannot drop anything: its verdicts are all `panel`,
+    # which is what makes an outage loud instead of quiet.
+    items, dropped = pulse_output.partition_dropped(all_items)
+    if dropped:
+        print(
+            f"INFO: pulse filtered {len(dropped)} item(s) as not relevant to Ben",
+            file=sys.stderr,
+        )
+
+    if any(item.get("classification_failed") for item in all_items):
         sources["classifier"] = CLASSIFIER_DEGRADED
 
     # A priority item is eligible for a banner until one has actually fired for
@@ -179,7 +190,11 @@ def _run(deps: dict, now, now_iso: str, local_now, today: str, offset_hours: flo
     # banner per call, so "one notification per run" is this line's obligation.
     notified = deps["notify"](fresh_priority)
 
-    for item in items:
+    # Over all_items, including the dropped ones: the store's job is to remember
+    # every candidate today has already produced. Recording a drop costs nothing
+    # (it can never be in fresh_ids) and keeps `first_seen` stable if a later run
+    # judges the same message differently and puts it back on the panel.
+    for item in all_items:
         # Read it plainly: it stays notified if it already was, and becomes
         # notified if the banner fired this run and this item was in that
         # banner. Both halves are load-bearing — drop the first and a quiet run
@@ -203,7 +218,7 @@ def _run(deps: dict, now, now_iso: str, local_now, today: str, offset_hours: flo
 
     payload = pulse_output.build_payload(
         items, sources, window_from.isoformat(), now_iso, now_iso, notified,
-        day=today,
+        day=today, filtered=len(dropped),
     )
     pulse_output.write_payload(payload, deps["output_dir"])
     _write(deps["last_run_path"], now_iso)

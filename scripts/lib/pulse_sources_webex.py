@@ -96,6 +96,36 @@ def space_is_eligible(space: dict, prefs, watched_space_threads: dict) -> tuple[
     return False, "unlisted"
 
 
+def created_at(msg) -> datetime | None:
+    """A message's timestamp, or None if Webex sent something unparseable."""
+    try:
+        return datetime.fromisoformat((msg.get("created") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def my_last_message_at(messages, my_email: str) -> datetime | None:
+    """When Ben last spoke in this batch — the cutoff for "already answered".
+
+    Webex exposes no read state for the authenticated user, so there is no way
+    to ask whether Ben has *seen* a message. Having spoken after it is the one
+    signal available, and it is the stronger of the two anyway: a reply is
+    evidence he dealt with it, where a read receipt would only say the message
+    crossed his screen.
+
+    Returns None when he has said nothing, which leaves every candidate standing.
+    """
+    latest = None
+    me = (my_email or "").strip().lower()
+    for msg in messages:
+        if (msg.get("personEmail") or "").strip().lower() != me:
+            continue
+        at = created_at(msg)
+        if at and (latest is None or at > latest):
+            latest = at
+    return latest
+
+
 def to_candidate(msg, space, tier_hint, prefs, my_email, my_names, watched_thread_ids) -> dict:
     created = msg.get("created", "")
     try:
@@ -135,7 +165,8 @@ def collect(
     output: dict[space_id, list[thread_id]]. Read-only — the pulse never writes
     .watched_threads.json.
 
-    Ben's own messages are dropped — the pulse is about what needs him.
+    Ben's own messages are dropped — the pulse is about what needs him — and so
+    is anything he has already replied to, which `my_last_message_at` decides.
 
     Note: webex_client.py has no `list_messages` method. The real fetch call
     is `get_messages(room_id, before=None, after=None, max_results=...)`,
@@ -164,6 +195,7 @@ def collect(
     candidates: list[dict] = []
     attempted = 0
     failed = 0
+    answered = 0
 
     for space in webex.list_spaces(max_results=400):
         eligible, space_tier = space_is_eligible(space, prefs, watched_space_threads)
@@ -197,15 +229,27 @@ def collect(
             )
             continue
 
+        # Computed before the candidate loop, over the whole batch: a message
+        # Ben has already replied to must not be surfaced, and his reply may sit
+        # anywhere in the batch relative to it.
+        answered_through = my_last_message_at(messages, my_email)
+
         for msg in messages:
-            created = msg.get("created", "")
-            try:
-                at = datetime.fromisoformat(created.replace("Z", "+00:00"))
-            except ValueError:
+            at = created_at(msg)
+            if at is None:
                 continue
             if at <= since:
                 continue
             if (msg.get("personEmail") or "").lower() == my_email.lower():
+                continue
+            # Ben spoke after this, so he has dealt with it. Dropped rather than
+            # demoted to the panel: the panel is for things that came in and did
+            # not interrupt him, not for a record of his own replies.
+            # Strictly earlier, not at-or-earlier. Equal timestamps are no
+            # evidence that Ben's reply came second, and the safe reading of an
+            # ambiguous order is the one that keeps the message visible.
+            if answered_through is not None and at < answered_through:
+                answered += 1
                 continue
             candidate = to_candidate(
                 msg, space, tier_hint, prefs, my_email, my_names, watched_thread_ids
@@ -227,6 +271,16 @@ def collect(
             ):
                 continue
             candidates.append(candidate)
+
+    # Logged, not returned in the status: anything other than "ok" there is
+    # rendered as a degraded source in the Hub, and suppressing messages Ben has
+    # already answered is the feature working, not a fault.
+    if answered:
+        print(
+            f"INFO: pulse suppressed {answered} Webex message(s) Ben had "
+            f"already replied to",
+            file=sys.stderr,
+        )
 
     if failed:
         return candidates, (

@@ -315,3 +315,49 @@ def test_classify_success_never_carries_the_classification_failed_key():
     assert len(out) == len(CANDIDATES)
     for item in out:
         assert "classification_failed" not in item
+
+
+# --- The relevance verdict -------------------------------------------------
+
+
+def test_drop_is_a_verdict_the_model_can_return():
+    raw = json.dumps({"items": [
+        {"index": 0, "tier": "drop", "trigger": "irrelevant",
+         "why": "Dark Reading newsletter — industry news, no bearing on Ben's work."},
+    ]})
+    assert parse_response(raw, CANDIDATES)[0]["tier"] == "drop"
+
+
+def test_an_omitted_candidate_defaults_to_panel_and_is_never_dropped():
+    # Omission must not silence, any more than it may escalate. Only the
+    # visible middle is a safe default, because both failure modes at the
+    # edges are invisible.
+    raw = json.dumps({"items": [{"index": 0, "tier": "drop", "why": "x"}]})
+    out = parse_response(raw, CANDIDATES)
+    assert out[1]["tier"] == "panel"
+
+
+def test_a_degraded_classifier_cannot_drop_anything():
+    # This is what makes a model outage loud instead of quiet: every verdict is
+    # panel, so partition_dropped removes nothing and Ben sees the lot.
+    class Boom:
+        class messages:
+            @staticmethod
+            def create(**_kw):
+                raise RuntimeError("bedrock is down")
+
+    out = classify(Boom(), CANDIDATES, "prefs", "n", "today 16:00", "a few hours", [])
+    assert [v["tier"] for v in out] == ["panel"] * len(CANDIDATES)
+
+
+def test_the_prompt_names_the_noise_ben_called_out_and_the_safe_default():
+    prompt = build_prompt(CANDIDATES, "prefs", "n", "today 16:00", "a few hours", [])
+    low = prompt.lower()
+    assert "dark reading" in low
+    assert "webinar" in low
+    # The asymmetry has to be stated, or the model treats the two errors as
+    # equally bad: a wrongly-panelled item costs a glance, a wrongly-dropped
+    # one is invisible.
+    assert "wrongly-dropped" in low
+    # A colleague's question is never droppable, whatever else the mail says.
+    assert "never dropped" in low

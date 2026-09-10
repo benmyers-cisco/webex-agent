@@ -5,6 +5,7 @@ import pytest
 
 from lib.pulse_output import (
     build_items,
+    partition_dropped,
     build_payload,
     failure_payload,
     write_payload,
@@ -238,3 +239,42 @@ def test_classification_failed_flag_propagates_from_verdict_to_item():
 def test_classification_failed_key_is_absent_on_a_normal_verdict():
     items = build_items(CANDIDATES, VERDICTS, {"day": "2026-09-09", "seen": {}}, NOW)
     assert "classification_failed" not in items[0]
+
+
+# --- The relevance filter -------------------------------------------------
+
+
+def test_partition_dropped_splits_on_the_drop_tier():
+    items = [
+        {"id": "a", "tier": "priority"},
+        {"id": "b", "tier": "drop"},
+        {"id": "c", "tier": "panel"},
+        {"id": "d", "tier": "drop"},
+    ]
+    kept, dropped = partition_dropped(items)
+    assert [i["id"] for i in kept] == ["a", "c"]
+    assert [i["id"] for i in dropped] == ["b", "d"]
+
+
+def test_build_items_still_returns_every_candidate_including_drops():
+    # The invariant that partition_dropped exists to protect: filtering inside
+    # build_items would make "fewer items than candidates" mean two things.
+    candidates = [{"source": "email", "text": "newsletter", "at": "2026-09-10T14:00:00+00:00"}]
+    verdicts = [{"tier": "drop", "trigger": "irrelevant", "why": "vendor marketing"}]
+    items = build_items(candidates, verdicts, {"seen": {}}, "2026-09-10T14:05:00+00:00")
+    assert len(items) == 1
+    assert items[0]["tier"] == "drop"
+
+
+def test_the_payload_reports_how_many_were_filtered():
+    # An aggressive filter must never be able to pass for a quiet hour.
+    payload = build_payload(
+        [], {}, "2026-09-10T13:00:00+00:00", "2026-09-10T14:00:00+00:00",
+        "2026-09-10T14:00:00+00:00", False, day="2026-09-10", filtered=14,
+    )
+    assert payload["filtered"] == 14
+
+
+def test_a_failed_run_reports_zero_filtered_rather_than_omitting_the_key():
+    payload = failure_payload("boom", "2026-09-10T14:00:00+00:00")
+    assert payload["filtered"] == 0

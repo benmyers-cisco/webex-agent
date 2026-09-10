@@ -6,13 +6,22 @@ question it asks is whether an item can wait for the next briefing, and the
 next briefing is passed in rather than inferred, because after 16:00 it is
 tomorrow morning and the bar therefore rises.
 
-Unclassified candidates default to `panel`, never `priority`. A model that
-drops an item must not be able to escalate it by omission. And a failure to
-call or parse the model at all must never come back as a clean empty list —
-that would read as "nothing was urgent" when the truth is "nothing was
-checked". Failures degrade to an all-panel result with the failure spelled
-out in `why`, printed loudly to stderr as well, so the run's own artifacts
-can never be mistaken for a quiet hour.
+There is a relevance question ahead of the urgency one, and it can return a
+third verdict, `drop`, which keeps an item out of the artifact entirely. Without
+it the panel showed every eligible message — newsletters and vendor webinar
+invitations included — and a glance surface nobody can glance at is no surface
+at all. The two questions are kept separate on purpose: "irrelevant" and "can
+wait" are different judgements, and collapsing them is how a real message that
+merely wasn't urgent ends up invisible.
+
+Unclassified candidates default to `panel` — never `priority`, and never `drop`.
+A model that omits an item must not be able to either escalate it or silence it
+by omission; both directions of that failure are hidden, and only the visible
+middle is safe. And a failure to call or parse the model at all must never come
+back as a clean empty list — that would read as "nothing was urgent" when the
+truth is "nothing was checked". Failures degrade to an all-panel result with the
+failure spelled out in `why`, printed loudly to stderr as well, so the run's own
+artifacts can never be mistaken for a quiet hour.
 """
 from __future__ import annotations
 
@@ -24,7 +33,7 @@ import sys
 MODEL_BEDROCK = "us.anthropic.claude-sonnet-4-20250514-v1:0"
 MODEL_DIRECT = "claude-sonnet-4-6-20250514"
 MAX_TOKENS = 4000
-VALID_TIERS = ("priority", "panel")
+VALID_TIERS = ("priority", "panel", "drop")
 
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
 
@@ -64,7 +73,37 @@ def build_prompt(candidates, prefs_text, now_iso, briefing_label, briefing_horiz
     return f"""You triage messages for Ben Myers (benmyers@cisco.com), a Cisco PM on Identity
 Intelligence / Identity Fabric. Current time: {now_iso}.
 
-There are exactly two outcomes, and one question decides between them:
+There are three outcomes. Two questions decide between them, asked in order.
+
+**Question one: does this have any bearing on Ben's work or his people?**
+
+If no, it is `drop` and you are done — it does not appear anywhere, not even on
+the panel. The panel is a glance surface and it is worthless if Ben has to read
+past marketing to use it. Drop, specifically:
+
+- Newsletters, industry news digests, and security-news roundups (Dark Reading,
+  The Register, vendor blogs). Interesting is not relevant.
+- Vendor and analyst marketing: product announcements, webinar and conference
+  invitations, demo offers, "let's get 15 minutes", pricing promotions, swag.
+- Recruiting mail, cold sales outreach, and anything from a mailing list Ben did
+  not ask a person for.
+- Automated all-hands broadcasts with no action for Ben: IT maintenance notices,
+  benefits reminders, training nags, survey requests, org-wide FYIs.
+- Personal and consumer mail that arrived at his work address: shopping, travel
+  promotions, subscriptions.
+- Bot chatter, build and CI noise, and channel-join or membership-change notices.
+
+Do NOT drop something merely because it can wait, or because it is minor, or
+because someone else is handling it. Those are `panel`. `drop` means the message
+has nothing to do with Ben's work, his projects, his customers, or his people.
+When you cannot tell, choose `panel` — a wrongly-panelled item costs a glance,
+a wrongly-dropped one is invisible.
+
+Two things are NEVER dropped, whatever they say: a message flagged WATCHLIST,
+and a message from a real colleague that asks Ben a question or names him in an
+ask. Both go to `panel` at worst.
+
+**Question two, for everything that survives:**
 
     **Can this wait until {briefing_label}?**
 
@@ -106,10 +145,10 @@ Respond with JSON only, no prose:
 
 {{"items": [
   {{"index": 0,
-    "tier": "priority",
-    "trigger": "watchlist|p1_channel|p2_mention|p2_thread|dm|meeting_imminent|email",
-    "why": "one sentence, specific, naming who needs what",
-    "draft_reply": "a ready-to-send reply, or null for panel items"}}
+    "tier": "priority|panel|drop",
+    "trigger": "watchlist|p1_channel|p2_mention|p2_thread|dm|meeting_imminent|email|irrelevant",
+    "why": "one sentence, specific, naming who needs what — or why it was dropped",
+    "draft_reply": "a ready-to-send reply, or null for panel and drop items"}}
 ]}}
 
 Include an entry for every candidate index.

@@ -385,3 +385,63 @@ def test_slack_notification_with_empty_body_returns_none():
         "body_preview": "",
     })
     assert parse_slack_notification(msg) is None
+
+
+# --- Bulk mail -------------------------------------------------------------
+# The senders below are verbatim from Ben's real inbox on 2026-09-10, where
+# every one of them reached the panel: they pass _is_automated, and the msgraph
+# CLI returns no recipient fields, so the inbox-presence rule waved them all
+# through.
+
+
+def test_marketing_and_newsletter_senders_are_dropped():
+    for address in (
+        "newsletter@ittnewsletter.com",
+        "newsletter@intelligentsia.com",
+        "gestore@info.gestore.com",
+        "hello@emails.paloaltonetworks.com",
+    ):
+        msg = _msg({"from": {"name": "Vendor", "address": address}})
+        assert classify_sender(msg, PREFS, ME) == "drop", address
+
+
+def test_a_two_label_domain_is_never_read_as_a_sending_subdomain():
+    # "mail.com" is a registrable domain, not "mail" plus "com".
+    assert email_mod.is_bulk_sender("someone@mail.com") is False
+    assert email_mod.is_bulk_sender("someone@email.com") is False
+
+
+def test_cisco_mail_is_never_bulk_dropped_by_address_shape():
+    # Internal noise is real, but it needs judgement rather than a pattern
+    # match — the classifier's relevance test handles it.
+    assert email_mod.is_bulk_sender("newsletter@cisco.com") is False
+    assert email_mod.is_bulk_sender("hello@mail.cisco.com") is False
+
+
+def test_bulk_beats_the_watchlist():
+    prefs = parse_prefs("""
+## Watchlist
+- Vendor Blast <hello@emails.example.com>
+""")
+    msg = _msg({"from": {"name": "Vendor Blast", "address": "hello@emails.example.com"}})
+    assert classify_sender(msg, prefs, ME) == "drop"
+
+
+def test_a_real_person_at_a_vendor_still_reaches_the_classifier():
+    # is_bulk_sender is structural, so it cannot catch this one. Dropping the
+    # CodeRabbit webinar invite is the relevance filter's job, not this
+    # function's, and claiming otherwise here would hide that.
+    msg = _msg({"from": {"name": "Sahil Bansal", "address": "sahil@coderabbit.ai"}})
+    assert classify_sender(msg, PREFS, ME) == "keep"
+
+
+def test_collect_asks_for_unread_mail_only():
+    captured = {}
+
+    def runner(args):
+        captured["args"] = args
+        return json.dumps({"messages": []})
+
+    collect("2026-09-09T14:00:00+00:00", PREFS, ME, runner=runner)
+    query = captured["args"][2]
+    assert query == "received>=2026-09-09 AND isRead:false"
