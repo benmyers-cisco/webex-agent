@@ -58,6 +58,10 @@ BULK_LOCALPARTS: frozenset[str] = frozenset({
     "newsletter", "newsletters", "news", "marketing", "promo", "promotions",
     "offers", "deals", "digest", "updates", "webinar", "webinars", "events",
     "community", "invite", "invites", "hello", "info",
+    # "communications@now.beyondtrust.com" — the one sender that still cleared
+    # eligibility after the first pass. Nobody signs a message they wrote from
+    # "communications@", so it belongs with the mailing functions above.
+    "communications", "campaign", "campaigns",
 })
 BULK_SUBDOMAINS: frozenset[str] = frozenset({
     "email", "emails", "mail", "mailer", "mailing", "e", "em", "info", "news",

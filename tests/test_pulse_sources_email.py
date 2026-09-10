@@ -400,6 +400,9 @@ def test_marketing_and_newsletter_senders_are_dropped():
         "newsletter@intelligentsia.com",
         "gestore@info.gestore.com",
         "hello@emails.paloaltonetworks.com",
+        # Neither the local part nor the subdomain was matched by the first
+        # pass; "communications@" is a mailing function, so it is now.
+        "communications@now.beyondtrust.com",
     ):
         msg = _msg({"from": {"name": "Vendor", "address": address}})
         assert classify_sender(msg, PREFS, ME) == "drop", address
