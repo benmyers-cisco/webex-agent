@@ -9,8 +9,12 @@ set +a
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/python@3.12/bin:$PATH"
 
-# Attempt to refresh AWS credentials (non-interactive, uses cached browser session)
-duo-sso -profile claudecode -valid-session-threshold 7200 -chrome-persistent >> /tmp/webex-retro.log 2>&1 || true
+# Attempt to refresh AWS credentials (non-interactive, uses cached browser session).
+# Via aws_refresh.sh for the timeout — a bare duo-sso waits on a dead browser forever, which
+# is how the hourly refresher hung for 15 days from 2026-08-19. Inline here it would hang the
+# retro instead.
+AWS_REFRESH_LOG=/dev/stderr AWS_REFRESH_THRESHOLD=7200 \
+  bash "$(dirname "$0")/aws_refresh.sh" >> /tmp/webex-retro.log 2>&1 || true
 
 if [ -n "$1" ]; then
     export RETRO_LOOKBACK_DAYS="$1"

@@ -22,6 +22,7 @@ from oauth import get_valid_token
 LAST_RUN_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".last_run")
 KNOWN_SPACES_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".known_spaces.json")
 WATCHED_THREADS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".watched_threads.json")
+PENDING_SPACES_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".pending_spaces.json")
 DEFAULT_LOOKBACK_H = 12
 WATCHED_THREAD_STALE_DAYS = 28
 
@@ -67,6 +68,70 @@ def save_known_spaces(spaces: dict[str, str]):
     """Persist current set of known space IDs → titles."""
     with open(KNOWN_SPACES_FILE, "w") as f:
         json.dump(spaces, f, indent=2)
+
+
+def load_pending_spaces() -> dict:
+    """Load the unclassified-channel queue. Structure:
+    {space_id: {title, suggestion, link, first_seen, last_seen}}
+    """
+    if os.path.exists(PENDING_SPACES_FILE):
+        try:
+            with open(PENDING_SPACES_FILE) as f:
+                return json.load(f)
+        except (ValueError, OSError):
+            pass
+    return {}
+
+
+def save_pending_spaces(pending: dict):
+    """Persist the unclassified-channel queue."""
+    with open(PENDING_SPACES_FILE, "w") as f:
+        json.dump(pending, f, indent=2)
+
+
+def queue_pending_spaces(channels: list[tuple[str, str, str, str]]) -> dict:
+    """Merge newly-seen channels into the pending queue and drop anything already classified.
+
+    The daily markdown scrolls out of reach, so suggestions used to be lost the moment
+    a newer report replaced them. This file is the durable worklist that /webex-watch
+    reads instead.
+
+    channels: list of (space_id, title, suggestion, link).
+    Entries whose title now appears in Always Scan or Never Scan are pruned — Ben may
+    have classified them by hand, and a resolved space shouldn't keep reappearing.
+    """
+    pending = load_pending_spaces()
+    now = datetime.now(timezone.utc).isoformat()
+
+    for space_id, title, suggestion, link in channels:
+        if space_id in pending:
+            # Seen again before it was classified — refresh, but keep first_seen so the
+            # skill can show how long it's been sitting.
+            pending[space_id]["last_seen"] = now
+            pending[space_id]["title"] = title
+            pending[space_id]["suggestion"] = suggestion
+        else:
+            pending[space_id] = {
+                "title": title,
+                "suggestion": suggestion,
+                "link": link,
+                "first_seen": now,
+                "last_seen": now,
+            }
+
+    prefs = load_preferences()
+    always_scan, never_scan = _parse_space_lists(prefs)
+    # "Mentions Only" is not parsed for scan decisions — unlisted channels already
+    # behave that way — but listing a channel there IS a decision, so it has to count
+    # as classified or the entry sits in the queue forever and resurfaces every review.
+    classified = always_scan | never_scan | _parse_mentions_only(prefs)
+    pending = {
+        sid: info for sid, info in pending.items()
+        if info.get("title", "").strip().lower() not in classified
+    }
+
+    save_pending_spaces(pending)
+    return pending
 
 
 def load_watched_threads() -> dict:
@@ -168,12 +233,14 @@ def triage_with_claude(client, transcript: str, space_name: str, user_email: str
     preferences = load_preferences()
     prefs_block = f"\n\nUSER PREFERENCES (use these to judge relevance):\n{preferences}" if preferences else ""
 
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     response = client.messages.create(
         model=model,
         max_tokens=3000,
         messages=[{
             "role": "user",
             "content": f"""You are a chief-of-staff creating an actionable briefing for {user_email}.
+Current date/time: {now_str}
 {prefs_block}
 
 Analyze this Webex conversation and categorize into EXACTLY these sections. Only include sections that have content — omit empty sections entirely.
@@ -245,16 +312,18 @@ Transcript:
     return response.content[0].text
 
 
-def format_messages(messages: list[dict], user_email: str = "") -> str:
+def format_messages(messages: list[dict], user_email: str = "", email_to_name: dict[str, str] = None) -> str:
     lines = []
+    name_map = email_to_name or {}
     for msg in reversed(messages):
-        sender = msg.get("personEmail", "Unknown")
+        sender_email = msg.get("personEmail", "Unknown")
+        sender_name = name_map.get(sender_email.lower(), sender_email)
         timestamp = msg.get("created", "")[:16].replace("T", " ")
         text = msg.get("text", "[non-text content]")
-        if user_email and sender.lower() == user_email.lower():
-            lines.append(f"[{timestamp}] **YOU ({sender})**: {text}")
+        if user_email and sender_email.lower() == user_email.lower():
+            lines.append(f"[{timestamp}] **YOU ({sender_name})**: {text}")
         else:
-            lines.append(f"[{timestamp}] {sender}: {text}")
+            lines.append(f"[{timestamp}] {sender_name} ({sender_email}): {text}")
     return "\n".join(lines)
 
 
@@ -356,6 +425,32 @@ def _parse_space_lists(preferences: str) -> tuple[set[str], set[str]]:
     return always_scan, never_scan
 
 
+def _parse_mentions_only(preferences: str) -> set[str]:
+    """Parse '## Mentions Only' space names.
+
+    Deliberately NOT used for scan decisions — an unlisted channel is already
+    mentions-only, so the section changes no behavior. It's read solely so the
+    pending-classification queue knows the space has been dealt with.
+    """
+    names = set()
+    in_section = False
+    for line in preferences.split("\n"):
+        stripped = line.strip()
+        lower = stripped.lower()
+        if lower.startswith("## mentions only"):
+            in_section = True
+            continue
+        if stripped.startswith("## "):
+            in_section = False
+            continue
+        if not in_section or not stripped.startswith("- "):
+            continue
+        name = stripped[2:].strip()
+        if name:
+            names.add(name.lower())
+    return names
+
+
 def find_my_relevant_spaces(webex: WebexClient, lookback: datetime, max_spaces: int = 20, watched_threads: dict = None) -> list[dict]:
     """Find relevant spaces using an optimized approach:
 
@@ -403,7 +498,10 @@ def find_my_relevant_spaces(webex: WebexClient, lookback: datetime, max_spaces: 
     total = len(active_spaces)
     for i, space in enumerate(active_spaces, 1):
         title = space.get("title", "")
-        title_lower = title.lower()
+        # Strip before comparing: preferences.md entries lose surrounding
+        # whitespace when parsed, so a room whose title has a stray trailing
+        # space (e.g. "Identity R&D Demos ") could never match otherwise.
+        title_lower = title.strip().lower()
         print(f"  Checking ({i}/{total}): {title[:40]}...", end="\r")
 
         # Never Scan: skip entirely
@@ -528,6 +626,11 @@ def main():
     known_spaces.update(current_spaces)
     save_known_spaces(known_spaces)
 
+    # Prune the pending queue on every run — Ben may have classified entries by hand
+    # since the last one. Newly-seen channels get merged in after triage, once we know
+    # what to suggest for them.
+    pending_spaces = queue_pending_spaces([])
+
     # Build set of new channel IDs (DMs don't need classification — always scanned)
     new_channel_ids = {s["id"] for s in new_spaces if s.get("type") != "direct" and not _is_group_chat(s)}
 
@@ -551,7 +654,8 @@ def main():
             )
 
         print(f"  Analyzing '{space['title']}' ({len(messages)} messages)...")
-        transcript = format_messages(messages, user_email)
+        email_to_name = webex.get_member_emails_to_names(space["id"])
+        transcript = format_messages(messages, user_email, email_to_name)
         triage = triage_with_claude(claude, transcript, space["title"], user_email)
 
         # Track triage results for new channels (before skipping)
@@ -571,31 +675,36 @@ def main():
             if "blocked on you" in lower:
                 if current_section and current_lines:
                     _append_section(current_section, current_lines, space["title"],
-                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
+                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts,
+                                    space_id=space["id"])
                 current_section = "blocked"
                 current_lines = []
             elif "waiting on others" in lower:
                 if current_section and current_lines:
                     _append_section(current_section, current_lines, space["title"],
-                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
+                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts,
+                                    space_id=space["id"])
                 current_section = "waiting"
                 current_lines = []
             elif "decisions made without you" in lower:
                 if current_section and current_lines:
                     _append_section(current_section, current_lines, space["title"],
-                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
+                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts,
+                                    space_id=space["id"])
                 current_section = "decisions"
                 current_lines = []
             elif "opportunities to add value" in lower:
                 if current_section and current_lines:
                     _append_section(current_section, current_lines, space["title"],
-                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
+                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts,
+                                    space_id=space["id"])
                 current_section = "opportunities"
                 current_lines = []
             elif lower.startswith("fyi"):
                 if current_section and current_lines:
                     _append_section(current_section, current_lines, space["title"],
-                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts)
+                                    blocked_parts, waiting_parts, decisions_parts, opportunities_parts, fyi_parts,
+                                    space_id=space["id"])
                 current_section = "fyi"
                 current_lines = []
             else:
@@ -635,24 +744,44 @@ def main():
 
         if new_channels:
             new_space_lines.append("**New channels — consider adding to preferences:**\n")
+            queued = []
             for s in new_channels:
                 title = s.get("title", "Unknown")
+                link = _space_link(s["id"])
+                title_display = f"[{title}]({link})" if link else title
                 result = new_channel_triage_results.get(s["id"])
                 if result:
                     _, triage_text, had_content = result
                     suggestion = _suggest_classification(title, triage_text, had_content)
                 else:
                     suggestion = "Mentions Only (no messages in lookback window)"
-                new_space_lines.append(f"- **{title}** → *{suggestion}*")
+                new_space_lines.append(f"- **{title_display}** → *{suggestion}*")
+                queued.append((s["id"], title, suggestion, link))
+
+            # Durable queue for /webex-watch — the markdown alone gets buried.
+            pending_spaces = queue_pending_spaces(queued)
 
         if new_dms:
             new_space_lines.append("\n**New DMs/group chats (always scanned, no action needed):**\n")
             for s in new_dms:
                 title = s.get("title", "Unknown")
+                link = _space_link(s["id"])
+                title_display = f"[{title}]({link})" if link else title
                 type_label = "DM" if s.get("type") == "direct" else "Group Chat"
-                new_space_lines.append(f"- {title} ({type_label})")
+                new_space_lines.append(f"- {title_display} ({type_label})")
 
         parts.append("## 🆕 New Spaces\n" + "\n".join(new_space_lines))
+
+    # The queue outlives any single run, so surface it even when this run found nothing
+    # new — that backlog is exactly what used to go unnoticed.
+    if pending_spaces:
+        oldest = min((i.get("first_seen", "") for i in pending_spaces.values()), default="")
+        age_note = f" (oldest since {oldest[:10]})" if oldest else ""
+        parts.append(
+            f"## 📋 Unclassified Channels\n"
+            f"{len(pending_spaces)} channel(s) awaiting classification{age_note} — "
+            f"run `/webex-watch review`."
+        )
 
     full_summary = "\n\n---\n\n".join(parts)
 
@@ -720,8 +849,28 @@ _EMPTY_SECTION_PHRASES = [
 ]
 
 
+def _space_link(space_id: str) -> str:
+    """Generate a Webex web link from a space ID."""
+    import base64
+    try:
+        decoded = base64.b64decode(space_id).decode()
+        uuid = decoded.split("/")[-1]
+        return f"https://web.webex.com/spaces/{uuid}"
+    except Exception:
+        return ""
+
+
+def _format_space_header(space_title: str, space_id: str) -> str:
+    """Format a space title with a clickable deep link."""
+    link = _space_link(space_id)
+    if link:
+        return f"**{space_title} - [open]({link})**"
+    return f"**{space_title}**"
+
+
 def _append_section(section: str, lines: list[str], space_title: str,
-                    blocked: list, waiting: list, decisions: list, opportunities: list, fyi: list):
+                    blocked: list, waiting: list, decisions: list, opportunities: list, fyi: list,
+                    space_id: str = ""):
     """Append parsed section content to the appropriate list."""
     content = "\n".join(lines).strip()
     if not content:
@@ -730,7 +879,8 @@ def _append_section(section: str, lines: list[str], space_title: str,
     content_lower = content.lower()
     if any(phrase in content_lower for phrase in _EMPTY_SECTION_PHRASES):
         return
-    entry = f"**{space_title}**\n{content}\n"
+    header = _format_space_header(space_title, space_id) if space_id else f"**{space_title}**"
+    entry = f"{header}\n{content}\n"
     if section == "blocked":
         blocked.append(entry)
     elif section == "waiting":

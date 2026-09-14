@@ -55,6 +55,9 @@ def get_client(force_refresh: bool = False) -> WebexClient:
 
 def with_token_retry(fn):
     """Decorator that retries a function once with a fresh token on auth failure."""
+    import functools
+
+    @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
@@ -66,8 +69,6 @@ def with_token_retry(fn):
                 get_client(force_refresh=True)
                 return fn(*args, **kwargs)
             raise
-    wrapper.__name__ = fn.__name__
-    wrapper.__doc__ = fn.__doc__
     return wrapper
 
 

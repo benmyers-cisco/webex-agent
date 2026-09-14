@@ -140,6 +140,21 @@ class WebexClient:
 
         return result
 
+    def get_member_emails_to_names(self, room_id: str) -> dict[str, str]:
+        """Get a mapping of personEmail → personDisplayName for all members in a space."""
+        email_to_name = {}
+        try:
+            response = self.client.get("/memberships", params={"roomId": room_id, "max": 100})
+            response.raise_for_status()
+            for member in response.json().get("items", []):
+                email = member.get("personEmail", "")
+                name = member.get("personDisplayName", "")
+                if email and name:
+                    email_to_name[email.lower()] = name
+        except httpx.HTTPStatusError:
+            pass
+        return email_to_name
+
     def get_member_count(self, room_id: str) -> int:
         """Get the number of members in a space. Returns -1 if access is denied (caller decides)."""
         try:
@@ -241,11 +256,13 @@ class WebexClient:
             ]
         return messages
 
-    def send_message(self, room_id: str, text: str, markdown: str = "") -> dict:
-        """Send a message to a space."""
+    def send_message(self, room_id: str, text: str, markdown: str = "", parent_id: str = "") -> dict:
+        """Send a message to a space, optionally as a thread reply."""
         payload = {"roomId": room_id, "text": text}
         if markdown:
             payload["markdown"] = markdown
+        if parent_id:
+            payload["parentId"] = parent_id
         response = self.client.post("/messages", json=payload)
         response.raise_for_status()
         return response.json()
