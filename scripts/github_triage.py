@@ -197,6 +197,7 @@ def fetch_repo_discussions(owner: str, repo: str, since_days: int = LOOKBACK_DAY
         url
         updatedAt
         createdAt
+        closed
         author { login }
         category { name }
         body
@@ -240,7 +241,9 @@ def fetch_repo_discussions(owner: str, repo: str, since_days: int = LOOKBACK_DAY
 
 # body is requested so score_relevance() has something to read. Without it every issue was
 # scored on its title alone, which is why the scoring looked useless enough to leave unwired.
-ISSUE_JSON_FIELDS = "number,title,url,updatedAt,author,labels,assignees,body,commentsCount"
+# state is requested so drop_closed() has something to check — without it a fetcher that
+# forgets --state=open cannot be caught downstream.
+ISSUE_JSON_FIELDS = "number,title,url,updatedAt,author,labels,assignees,body,commentsCount,state"
 
 
 def fetch_relevant_issues(since_days: int = LOOKBACK_DAYS) -> list[dict]:
@@ -292,11 +295,16 @@ def fetch_relevant_issues(since_days: int = LOOKBACK_DAYS) -> list[dict]:
         "--limit", "15",
     ], "assigned")
 
-    # Issues mentioning Ben, open or closed — a question aimed at him on a closed issue still
-    # needs an answer.
+    # Issues mentioning Ben. This deliberately included closed ones on the theory that a
+    # question aimed at him on a closed issue still needs an answer. In practice it did the
+    # opposite: on 2026-09-15 three of the five items leading "Needs Your Input" were closed
+    # — #19048 closed in December 2024, #23036 in July 2025 — because a late comment or a
+    # label change moves an ancient issue's updatedAt into the window, and the briefing then
+    # asked Ben to act on work that was already finished or explicitly not planned.
     collect([
         f"--repo={GITHUB_ORG}/{MAIN_REPO}",
         f"--mentions={GITHUB_USER}",
+        "--state=open",
         f"--updated=>={cutoff}",
         "--limit", "10",
     ], "mentioned")
@@ -326,8 +334,9 @@ def fetch_mentions_and_notifications() -> list[dict]:
         f"org:{GITHUB_ORG}",
         f"mentions:{GITHUB_USER}",
         f"updated:>={cutoff}",
+        "--state=open",
         "--limit", "15",
-        "--json", "number,title,url,updatedAt,author,repository"
+        "--json", "number,title,url,updatedAt,author,repository,state"
     ])
     if raw:
         return json.loads(raw)
@@ -466,6 +475,33 @@ def score_relevance(item: dict, item_type: str) -> int:
     return min(score, 10)
 
 
+def drop_closed(items: list[dict], kind: str) -> tuple[list[dict], int]:
+    """Drop items that are already closed. Returns (kept, dropped_count).
+
+    Every fetcher above now asks GitHub for open items only, so in normal operation this
+    drops nothing. It exists as a single chokepoint because relying on each query to
+    remember is exactly what failed: the `mentions` query omitted the filter, and three
+    long-closed issues led the 2026-09-15 briefing as things needing Ben's input. A fifth
+    fetcher added later cannot reintroduce that.
+
+    Issues and mentions carry `state` ("open"/"closed"); discussions carry `closed` (bool).
+    Both are handled. An item with NEITHER field is kept — a field GitHub didn't return is
+    not evidence the item is closed, and silently dropping live work is worse than the bug
+    this guards against. Docs commits have no state and are not passed through here at all.
+    """
+    kept: list[dict] = []
+    for item in items:
+        closed = item.get("closed")
+        if closed is None:
+            closed = (item.get("state") or "").lower() == "closed"
+        if closed:
+            log(f"    dropping closed {kind} #{item.get('number')}: "
+                f"{(item.get('title') or '')[:60]}")
+            continue
+        kept.append(item)
+    return kept, len(items) - len(kept)
+
+
 def rank_and_filter(items: list[dict], item_type: str) -> tuple[list[dict], int]:
     """Attach score + project to each item, drop those under MIN_SCORE, sort best-first.
 
@@ -589,7 +625,7 @@ Recent comments:
             found = ", ".join(sorted(i.get("sources", set()))) or "unknown"
             mention_flag = "YES" if i.get("directly_mentioned") else "NO"
             data_section += (
-                f"**#{i['number']}** {i['title']} "
+                f"**[#{i['number']}]({i.get('url', '')})** {i['title']} "
                 f"(score: {i.get('score', '?')}/10, project: {i.get('project', 'Uncategorized')}, "
                 f"found via: {found}, directly @mentioned: {mention_flag}, "
                 f"labels: {labels}, assignees: {assignees}, "
@@ -601,7 +637,7 @@ Recent comments:
         for m in mentions:
             repo = m.get("repository", {}).get("name", "unknown")
             data_section += (
-                f"**#{m['number']}** [{repo}] {m['title']} "
+                f"**[#{m['number']}]({m.get('url', '')})** [{repo}] {m['title']} "
                 f"(score: {m.get('score', '?')}/10, project: {m.get('project', 'Uncategorized')}, "
                 f"updated: {m.get('updatedAt', '')[:10]})\n"
             )
@@ -633,7 +669,7 @@ def generate_triage(discussions, issues, mentions, docs) -> str:
     return response.content[0].text
 
 
-def write_output(body: str, dropped: int | None = None) -> str:
+def write_output(body: str, dropped: int | None = None, closed: int | None = None) -> str:
     """Write today's triage file for this slot. Always called — see main() for why."""
     now = datetime.now()
     label = "morning sweep" if SLOT == "am" else "afternoon delta"
@@ -645,6 +681,10 @@ def write_output(body: str, dropped: int | None = None) -> str:
     # threshold ate it" and no way to tell which from the file alone.
     if dropped:
         header += f" | {dropped} item(s) below score {MIN_SCORE} filtered out"
+    # Same reasoning as the drop count: state what was excluded rather than leaving the
+    # reader to wonder whether a closed item was suppressed or simply never fetched.
+    if closed:
+        header += f" | {closed} closed item(s) excluded"
     header += "\n\n---\n\n"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(OUTPUT_DIR, f"{now.strftime('%Y-%m-%d')}{FILE_SUFFIX}")
@@ -664,18 +704,24 @@ def main() -> int:
 
     log("  Fetching discussions...")
     discussions = fetch_recent_discussions()
+    discussions, closed_d = drop_closed(discussions, "discussion")
     discussions, dropped_d = rank_and_filter(discussions, "discussion")
-    log(f"  Found {len(discussions)} recent discussions (dropped {dropped_d} under score {MIN_SCORE})")
+    log(f"  Found {len(discussions)} recent discussions (dropped {closed_d} closed, "
+        f"{dropped_d} under score {MIN_SCORE})")
 
     log("  Fetching issues...")
     issues = fetch_relevant_issues()
+    issues, closed_i = drop_closed(issues, "issue")
     issues, dropped_i = rank_and_filter(issues, "issue")
-    log(f"  Found {len(issues)} relevant issues (dropped {dropped_i} under score {MIN_SCORE})")
+    log(f"  Found {len(issues)} relevant issues (dropped {closed_i} closed, "
+        f"{dropped_i} under score {MIN_SCORE})")
 
     log("  Fetching mentions...")
     mentions = fetch_mentions_and_notifications()
+    mentions, closed_m = drop_closed(mentions, "mention")
     mentions, dropped_m = rank_and_filter(mentions, "mention")
-    log(f"  Found {len(mentions)} mentions (dropped {dropped_m} under score {MIN_SCORE})")
+    log(f"  Found {len(mentions)} mentions (dropped {closed_m} closed, "
+        f"{dropped_m} under score {MIN_SCORE})")
 
     # Docs commits are deliberately NOT score-filtered. score_relevance() reads title/body and
     # a commit has neither — it has `message` — so every docs commit would score 0 and the
@@ -685,6 +731,7 @@ def main() -> int:
     log(f"  Found {len(docs)} docs commits (not score-filtered)")
 
     dropped_total = dropped_d + dropped_i + dropped_m
+    closed_total = closed_d + closed_i + closed_m
 
     # A fetch failure is not a quiet day. This has to be said in the FILE, not just the
     # log: /morning-coffee reads the file and never sees stderr, so a silent 0-item file
@@ -707,23 +754,29 @@ def main() -> int:
     if not any([discussions, issues, mentions, docs]):
         # Distinguish "nothing was there" from "the score filter took everything" — those are
         # very different signals and the old message asserted the first regardless.
-        if dropped_total:
+        if dropped_total or closed_total:
+            parts = []
+            if dropped_total:
+                parts.append(f"{dropped_total} scored under {MIN_SCORE}")
+            if closed_total:
+                parts.append(f"{closed_total} were already closed")
             reason = (
-                f"All four sources returned zero items **above the relevance threshold** for the "
-                f"last {LOOKBACK_DAYS} days. {dropped_total} item(s) were fetched but scored under "
-                f"{MIN_SCORE}, so this is a low-signal period rather than an empty one — lower "
-                f"`MIN_SCORE` in `github_triage.py` if that looks wrong."
+                f"All four sources returned zero items **that qualify** for the last "
+                f"{LOOKBACK_DAYS} days. Items were fetched, but {' and '.join(parts)}, so this "
+                f"is a low-signal period rather than an empty one — lower `MIN_SCORE` in "
+                f"`github_triage.py` if that looks wrong."
             )
         else:
             reason = (
                 f"All four sources returned zero items for the last {LOOKBACK_DAYS} days, and "
-                "nothing was dropped by the relevance filter."
+                "nothing was dropped by the relevance or closed-state filters."
             )
         path = write_output(
             f"## No activity\n\n{reason} Every API call succeeded — this is not a failure.\n",
             dropped_total,
+            closed_total,
         )
-        log(f"no activity, all fetches OK ({dropped_total} filtered) — wrote {path}")
+        log(f"no activity, all fetches OK ({dropped_total} filtered, {closed_total} closed) — wrote {path}")
         return 0
 
     log("  Generating triage with Claude...")
@@ -741,7 +794,7 @@ def main() -> int:
         log(f"FAILED: Claude generation error — {exc} — wrote {path}")
         return 1
 
-    path = write_output(triage_md, dropped_total)
+    path = write_output(triage_md, dropped_total, closed_total)
     log(f"Written to {path}")
     return 0
 
