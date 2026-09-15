@@ -51,6 +51,9 @@ def _deps(tmp_path, **over):
         "collect_calendar": lambda **kw: ([], "ok"),
         "classify": lambda **kw: [dict(PRIORITY_VERDICT)],
         "notify": lambda items: bool(items),
+        # Nothing resolves by default: a test that wants an item to disappear
+        # has to say so, so no test can pass by accidentally losing one.
+        "resolve_answered": lambda **kw: set(),
     }
     base.update(over)
     return base
@@ -333,8 +336,12 @@ def test_an_item_notified_on_run_one_still_reads_notified_on_run_three(tmp_path)
     assert first["notified_this_run"] is True
     assert first["items"][0]["notified"] is True
 
+    # A run that collects nothing new still carries the item, and carrying must
+    # not launder away the interruption already delivered for it.
     quiet = run(_deps(tmp_path, collect_webex=lambda **kw: ([], "ok")))
-    assert quiet["items"] == []
+    assert quiet["items"][0]["carried_forward"] is True
+    assert quiet["items"][0]["notified"] is True
+    assert quiet["notified_this_run"] is False
 
     third = run(_deps(tmp_path))
     assert third["notified_this_run"] is False
@@ -687,3 +694,141 @@ def test_the_calendar_meetings_reach_the_classifier(tmp_path):
         classify=capture,
     ))
     assert seen["meetings"] == meetings
+
+
+# --- Carry-forward: rule 5. Vanishing must never read as handled. ---
+
+PANEL_VERDICT = {"tier": "panel", "trigger": "dm", "why": "Asks to confirm.",
+                 "draft_reply": None}
+QUIET = {"collect_webex": lambda **kw: ([], "ok"), "classify": lambda **kw: []}
+
+
+def _panel_deps(tmp_path, **over):
+    base = {"classify": lambda **kw: [dict(PANEL_VERDICT)]}
+    base.update(over)
+    return _deps(tmp_path, **base)
+
+
+def test_a_panel_item_from_an_earlier_run_is_still_on_the_panel_an_hour_later(tmp_path):
+    """The 2026-09-15 regression. Two DMs from Aanjan Ravi were collected at
+    13:15, correctly panelled, and gone from the artifact by 14:15 — visible for
+    exactly one hour, never notified, never answered, just no longer anywhere.
+    """
+    deps = _panel_deps(tmp_path)
+    first = run(deps)
+    assert [i["text"] for i in first["items"]] == ["Confirm before the pre-read?"]
+
+    second = run(_panel_deps(tmp_path, **QUIET))
+    assert [i["text"] for i in second["items"]] == ["Confirm before the pre-read?"]
+    assert second["items"][0]["carried_forward"] is True
+    assert second["carried"] == 1
+
+
+def test_a_carried_item_keeps_the_time_it_actually_arrived(tmp_path):
+    """Not the time it was carried. The panel is for deciding whether to act, and
+    "12:51" and "an hour ago" lead to different decisions."""
+    run(_panel_deps(tmp_path))
+    second = run(_panel_deps(tmp_path, **QUIET))
+    assert second["items"][0]["at"] == CAND["at"]
+    assert second["items"][0]["first_seen"] == NOW.isoformat()
+
+
+def test_an_item_ben_has_since_answered_leaves_the_panel(tmp_path):
+    run(_panel_deps(tmp_path))
+    second = run(_panel_deps(
+        tmp_path, resolve_answered=lambda **kw: {kw["items"][0]["id"]}, **QUIET
+    ))
+    assert second["items"] == []
+    assert second["carried"] == 0
+
+
+def test_a_resolved_item_is_not_re_checked_on_the_next_run(tmp_path):
+    """Resolution is recorded, so the third run neither re-carries it nor spends
+    another Webex call re-deciding it."""
+    run(_panel_deps(tmp_path))
+    run(_panel_deps(tmp_path, resolve_answered=lambda **kw: {kw["items"][0]["id"]}, **QUIET))
+
+    asked = []
+
+    def _record(**kw):
+        asked.append(kw["items"])
+        return set()
+
+    third = run(_panel_deps(tmp_path, resolve_answered=_record, **QUIET))
+    assert third["items"] == []
+    assert asked == []  # nothing carried, so nothing to ask about
+
+
+def test_the_item_is_carried_repeatedly_until_something_resolves_it(tmp_path):
+    run(_panel_deps(tmp_path))
+    for _ in range(3):
+        payload = run(_panel_deps(tmp_path, **QUIET))
+        assert payload["carried"] == 1
+
+
+def test_a_carried_item_is_not_shown_twice_when_it_is_collected_again(tmp_path):
+    """A message still inside the next run's window arrives as a fresh candidate
+    AND sits in the store. The fresh copy — with this run's verdict — wins."""
+    run(_panel_deps(tmp_path))
+    second = run(_panel_deps(tmp_path))
+    assert len(second["items"]) == 1
+    assert second["carried"] == 0
+    assert "carried_forward" not in second["items"][0]
+
+
+def test_a_carried_priority_item_whose_banner_failed_still_gets_its_retry(tmp_path):
+    """Rule 4 promises a retry until a banner actually fires. Before the
+    carry-forward that promise expired with the window: an item whose banner hit
+    a permission dialog was gone from `items` an hour later, so nothing could
+    retry it."""
+    run(_deps(tmp_path, notify=lambda items: False))
+    second = run(_deps(tmp_path, notify=lambda items: True, **QUIET))
+    assert second["notified_this_run"] is True
+    assert second["items"][0]["carried_forward"] is True
+    assert second["items"][0]["notified"] is True
+
+
+def test_a_carried_priority_item_already_notified_does_not_interrupt_again(tmp_path):
+    run(_deps(tmp_path))  # notify succeeds
+    second = run(_deps(tmp_path, **QUIET))
+    assert second["notified_this_run"] is False
+    assert second["items"][0]["notified"] is True
+
+
+def test_a_dropped_item_is_never_carried_back_onto_the_panel(tmp_path):
+    drop = {"tier": "drop", "trigger": "irrelevant", "why": "Newsletter.", "draft_reply": None}
+    first = run(_deps(tmp_path, classify=lambda **kw: [drop]))
+    assert first["items"] == []
+    second = run(_deps(tmp_path, **QUIET))
+    assert second["items"] == []
+    assert second["carried"] == 0
+
+
+def test_carried_items_do_not_survive_the_day_boundary(tmp_path):
+    """The store resets on the first run of a new day. An unanswered message from
+    yesterday belongs to the 08:30 briefing, not to today's urgency panel."""
+    run(_panel_deps(tmp_path))
+    tomorrow = NOW.replace(day=NOW.day + 1)
+    payload = run(_panel_deps(tmp_path, now=tomorrow, **QUIET))
+    assert payload["items"] == []
+    assert payload["carried"] == 0
+
+
+def test_a_failed_run_does_not_lose_a_carried_item(tmp_path):
+    """The failure payload carries no items and the guard writes no state, so the
+    next successful run still finds it in the store."""
+    run(_panel_deps(tmp_path))
+    failed = run(_panel_deps(tmp_path, collect_webex=_boom))
+    assert failed["status"] == "failed"
+    assert failed["items"] == []
+    recovered = run(_panel_deps(tmp_path, **QUIET))
+    assert recovered["carried"] == 1
+
+
+def test_a_resolver_failure_leaves_the_item_visible(tmp_path):
+    """resolve_answered degrades to an empty set internally, but if it raised, the
+    run guard would still write a failure artifact rather than a quiet panel."""
+    run(_panel_deps(tmp_path))
+    payload = run(_panel_deps(tmp_path, resolve_answered=_boom, **QUIET))
+    assert payload["status"] == "failed"
+    assert payload["items"] == []

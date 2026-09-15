@@ -28,6 +28,12 @@ Three failure rules shape the code below:
    stays eligible for a retry until one does — an urgent message whose banner
    hit a permission dialog or a timeout would otherwise never interrupt Ben at
    all. The local day boundary resets the store and is the retry bound.
+5. Vanishing must never read as handled. An item outlives the window it arrived
+   in: pulse_output.carry_forward restores everything from earlier today that is
+   still unresolved, and only a real signal — Ben having replied, per
+   pulse_sources_webex.resolve_answered — takes it off the panel. Before this,
+   an item was visible for one hour and then simply gone, which on the panel is
+   indistinguishable from having been dealt with.
 """
 from __future__ import annotations
 
@@ -167,6 +173,32 @@ def _run(deps: dict, now, now_iso: str, local_now, today: str, offset_hours: flo
     if any(item.get("classification_failed") for item in all_items):
         sources["classifier"] = CLASSIFIER_DEGRADED
 
+    # Everything from earlier today that Ben has not dealt with, restored beside
+    # this run's items. The artifact is rebuilt from scratch every hour, so
+    # without this an item was visible for exactly one hour and then gone —
+    # notified or not, answered or not. Merged BEFORE the notify selection below,
+    # so a carried priority item whose banner never fired is still eligible for
+    # the retry that rule 4 promises it.
+    carried = pulse_output.carry_forward(state, {item["id"] for item in all_items})
+
+    # Asked before the merge, so an item Ben has since answered neither reaches
+    # the panel nor re-fires a banner at him about his own resolved conversation.
+    resolved_ids = deps["resolve_answered"](items=carried, my_email=deps["my_email"]) if carried else set()
+    if resolved_ids:
+        carried = [item for item in carried if item["id"] not in resolved_ids]
+        print(
+            f"INFO: pulse resolved {len(resolved_ids)} carried item(s) Ben has "
+            f"since answered",
+            file=sys.stderr,
+        )
+    if carried:
+        print(
+            f"INFO: pulse carried {len(carried)} unresolved item(s) forward from "
+            f"earlier runs today",
+            file=sys.stderr,
+        )
+    items += carried
+
     # A priority item is eligible for a banner until one has actually fired for
     # it. `notified` is history, not "have we seen this before", so an
     # unanswered ask from 09:15 still does not re-fire every hour — it was
@@ -194,7 +226,10 @@ def _run(deps: dict, now, now_iso: str, local_now, today: str, offset_hours: flo
     # every candidate today has already produced. Recording a drop costs nothing
     # (it can never be in fresh_ids) and keeps `first_seen` stable if a later run
     # judges the same message differently and puts it back on the panel.
-    for item in all_items:
+    # all_items, not items: the store's job is to remember every candidate today
+    # has produced, drops included. Plus the carried ones, whose `notified` can
+    # change on this run if a retry banner finally fired for them.
+    for item in all_items + carried:
         # Read it plainly: it stays notified if it already was, and becomes
         # notified if the banner fired this run and this item was in that
         # banner. Both halves are load-bearing — drop the first and a quiet run
@@ -208,17 +243,22 @@ def _run(deps: dict, now, now_iso: str, local_now, today: str, offset_hours: flo
         # was just interrupted about must not read as un-notified there, and the
         # artifact must not disagree with the store the next run loads.
         item["notified"] = item["notified"] or (notified and item["id"] in fresh_ids)
-        state["seen"][item["id"]] = {
-            "first_seen": item["first_seen"],
-            "notified": item["notified"],
-            "resolved": item["resolved"],
-            "tier": item["tier"],
-        }
+        state["seen"][item["id"]] = pulse_output.state_entry(item)
+
+    # Recorded so tomorrow's — and the next hour's — run neither re-carries these
+    # nor spends another Webex call re-deciding them. Done after the loop above
+    # because a resolved item is not in `carried` any more, so nothing there
+    # would touch it.
+    for fid in resolved_ids:
+        entry = state["seen"].get(fid)
+        if isinstance(entry, dict):
+            entry["resolved"] = True
+
     pulse_state.save_state(deps["state_path"], state)
 
     payload = pulse_output.build_payload(
         items, sources, window_from.isoformat(), now_iso, now_iso, notified,
-        day=today, filtered=len(dropped),
+        day=today, filtered=len(dropped), carried=len(carried),
     )
     pulse_output.write_payload(payload, deps["output_dir"])
     _write(deps["last_run_path"], now_iso)
@@ -335,6 +375,9 @@ def main() -> int:
             kw["since_iso"], kw["prefs"], kw["my_email"]
         ),
         "collect_calendar": lambda **kw: pulse_sources_calendar.collect(kw["now"]),
+        "resolve_answered": lambda **kw: pulse_sources_webex.resolve_answered(
+            webex, kw["items"], kw["my_email"]
+        ),
         "classify": lambda **kw: pulse_classify.classify(
             client, kw["candidates"], kw["prefs_text"], kw["now_iso"],
             kw["briefing_label"], kw["briefing_horizon"], kw["meetings"],

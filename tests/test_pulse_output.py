@@ -10,6 +10,8 @@ from lib.pulse_output import (
     failure_payload,
     write_payload,
     archive_if_new_day,
+    carry_forward,
+    state_entry,
 )
 
 NOW = "2026-09-09T18:15:03+00:00"
@@ -278,3 +280,136 @@ def test_the_payload_reports_how_many_were_filtered():
 def test_a_failed_run_reports_zero_filtered_rather_than_omitting_the_key():
     payload = failure_payload("boom", "2026-09-10T14:00:00+00:00")
     assert payload["filtered"] == 0
+
+
+# --- state_entry() / carry_forward() — the artifact is a view of the day, not
+# of the last hour. See the 2026-09-15 case in carry_forward's docstring. ---
+
+PANEL_VERDICTS = [{"tier": "panel", "trigger": "dm", "why": "Asks to confirm.",
+                   "draft_reply": None}]
+DROP_VERDICTS = [{"tier": "drop", "trigger": "irrelevant", "why": "Newsletter.",
+                  "draft_reply": None}]
+
+
+def _item(tier="panel", **over):
+    verdicts = PANEL_VERDICTS if tier == "panel" else VERDICTS
+    item = build_items(CANDIDATES, verdicts, {"day": "2026-09-09", "seen": {}}, NOW)[0]
+    item.update(over)
+    return item
+
+
+def _store(item, **over):
+    entry = state_entry(item)
+    entry.update(over)
+    return {"day": "2026-09-09", "seen": {item["id"]: entry}}
+
+
+def test_build_items_carries_the_space_id():
+    """carry_forward rebuilds from the stored item alone, and resolve_answered
+    needs to know which space to ask about."""
+    assert build_items(CANDIDATES, VERDICTS, {"day": "2026-09-09", "seen": {}}, NOW)[0][
+        "space_id"
+    ] == "abc"
+
+
+def test_a_panel_item_stores_its_whole_payload():
+    entry = state_entry(_item())
+    assert entry["item"]["text"] == "Confirm before the pre-read?"
+    assert entry["tier"] == "panel"
+
+
+def test_a_dropped_item_stores_only_its_flags():
+    """It never reaches the artifact, so a payload for it is dead weight in a
+    file every run reads — and its absence is what makes it uncarryable."""
+    dropped = build_items(CANDIDATES, DROP_VERDICTS, {"day": "2026-09-09", "seen": {}}, NOW)[0]
+    entry = state_entry(dropped)
+    assert "item" not in entry
+    assert entry["tier"] == "drop"
+
+
+def test_the_stored_payload_is_a_copy_not_a_reference():
+    item = _item()
+    entry = state_entry(item)
+    item["text"] = "mutated after the store was built"
+    assert entry["item"]["text"] == "Confirm before the pre-read?"
+
+
+def test_an_unresolved_panel_item_is_carried_into_a_later_run():
+    carried = carry_forward(_store(_item()), fresh_ids=set())
+    assert len(carried) == 1
+    assert carried[0]["text"] == "Confirm before the pre-read?"
+    assert carried[0]["carried_forward"] is True
+    assert carried[0]["first_seen"] == NOW
+
+
+def test_a_carried_item_keeps_its_original_tier_and_is_never_escalated():
+    """Restoration, not re-judgement. Omission must never escalate, and neither
+    may age — an item that could wait at 13:15 has not become urgent by 14:15."""
+    carried = carry_forward(_store(_item()), fresh_ids=set())
+    assert carried[0]["tier"] == "panel"
+
+
+def test_an_item_this_run_collected_again_is_not_also_carried():
+    """The fresh copy has this run's verdict and `why`. Carrying it too would
+    show Ben the same message twice on one panel."""
+    item = _item()
+    assert carry_forward(_store(item), fresh_ids={item["id"]}) == []
+
+
+def test_a_resolved_item_is_not_carried():
+    assert carry_forward(_store(_item(), resolved=True), fresh_ids=set()) == []
+
+
+def test_an_item_resolved_this_run_is_not_carried():
+    item = _item()
+    assert carry_forward(_store(item), fresh_ids=set(), resolved_ids={item["id"]}) == []
+
+
+def test_an_entry_with_no_stored_payload_is_skipped():
+    """A store written before carry_forward existed, or a dropped item. There is
+    nothing to rebuild, and a placeholder would put a hollow row on a glance
+    surface."""
+    state = {"day": "2026-09-09", "seen": {
+        "old": {"first_seen": NOW, "notified": False, "resolved": False, "tier": "panel"},
+    }}
+    assert carry_forward(state, fresh_ids=set()) == []
+
+
+def test_a_drop_tier_entry_is_never_carried_even_with_a_payload():
+    item = _item()
+    state = _store(item, tier="drop")
+    assert carry_forward(state, fresh_ids=set()) == []
+
+
+def test_the_store_flags_win_over_the_payload_snapshot():
+    """The embedded copy is a snapshot of the run that wrote it; the top-level
+    flags are what later runs update in place. A banner that fired on run two
+    must not read as un-notified on run three."""
+    item = _item(tier="priority")
+    assert item["notified"] is False
+    carried = carry_forward(_store(item, notified=True), fresh_ids=set())
+    assert carried[0]["notified"] is True
+
+
+def test_a_malformed_store_entry_does_not_break_the_run():
+    state = {"day": "2026-09-09", "seen": {"junk": "not a dict", "also": None}}
+    assert carry_forward(state, fresh_ids=set()) == []
+
+
+def test_an_empty_store_carries_nothing():
+    assert carry_forward({"day": "2026-09-09", "seen": {}}, fresh_ids=set()) == []
+    assert carry_forward({}, fresh_ids=set()) == []
+
+
+def test_the_payload_reports_how_many_items_were_carried():
+    payload = build_payload([], {}, "f", "t", NOW, False, carried=3)
+    assert payload["carried"] == 3
+
+
+def test_the_payload_defaults_carried_to_zero():
+    assert build_payload([], {}, "f", "t", NOW, False)["carried"] == 0
+
+
+def test_a_failed_run_reports_nothing_carried():
+    """A failed run does not get to speak for earlier ones."""
+    assert failure_payload("boom", NOW)["carried"] == 0

@@ -12,7 +12,14 @@ Two invariants:
    — a brand-new priority item reads False here, and the orchestrator sets it
    true afterwards only if the banner really fired.
 
-A third invariant lives specifically in build_items: it must never silently
+4. The artifact is a view of the whole day, not of the last hour. Items are
+   rebuilt from this run's candidates, then unresolved items from earlier runs
+   today are restored beside them by carry_forward. Without that step an item
+   was visible for exactly one hour and then gone, notified or not, resolved or
+   not. Carried items are flagged `carried_forward` and counted in `carried`,
+   because `window` still describes only what this run examined.
+
+A further invariant lives specifically in build_items: it must never silently
 drop a candidate. If the classifier returns fewer verdicts than candidates
 (a truncated response, a short list from a degraded call, etc.), the missing
 tail is padded with the same panel default the classifier itself uses on
@@ -68,6 +75,12 @@ def build_items(candidates, verdicts, state, now_iso) -> list[dict]:
             "source": candidate.get("source"),
             "trigger": verdict.get("trigger"),
             "channel": candidate.get("channel"),
+            # Carried on the item, not just the candidate, because carry_forward
+            # rebuilds a later run's panel entry from the stored item alone and
+            # resolve_answered needs to know which space to ask about. Deriving
+            # it back out of `link` would make the artifact's format the API for
+            # a lookup, which is the kind of coupling that breaks quietly.
+            "space_id": candidate.get("space_id"),
             "from": {"name": candidate.get("from_name"), "email": candidate.get("from_email")},
             "at": candidate.get("at"),
             "text": candidate.get("text"),
@@ -119,8 +132,88 @@ def partition_dropped(items) -> tuple[list[dict], list[dict]]:
     return kept, dropped
 
 
+def state_entry(item: dict) -> dict:
+    """The seen-store record for an item.
+
+    A panel or priority item stores its whole payload; a dropped one stores only
+    the flags. The payload is what makes carry_forward possible without a second
+    fetch or a second classification, and a dropped item never reaches the
+    artifact, so a payload for it would be dead weight in a file every run reads.
+
+    Copied, not referenced. The orchestrator mutates `notified` on the item after
+    this is built, and a shared reference would make the store's contents depend
+    on statement order in the caller.
+    """
+    entry = {
+        "first_seen": item["first_seen"],
+        "notified": item["notified"],
+        "resolved": item["resolved"],
+        "tier": item["tier"],
+    }
+    if item.get("tier") != "drop":
+        entry["item"] = dict(item)
+    return entry
+
+
+def carry_forward(state, fresh_ids, resolved_ids=()) -> list[dict]:
+    """Unresolved items from earlier runs today, restored for this run's artifact.
+
+    pulse.json is rebuilt from scratch every run out of that run's candidates
+    alone, so an item lived for exactly one hour and then vanished whether or not
+    Ben looked in that hour. On 2026-09-15 two DMs from Aanjan Ravi were
+    collected at 13:15, correctly panelled, and gone by 14:15 — never notified,
+    never resolved, just no longer anywhere. The seen store had tracked
+    `resolved` for them the whole time and nothing read it.
+
+    Four exclusions, each for its own reason:
+
+    - No stored payload. Either a dropped item or a pre-carry-forward store
+      entry; there is nothing to rebuild and inventing a placeholder would put a
+      hollow item on a glance surface.
+    - Already in `fresh_ids`. This run collected the same message, so the fresh
+      copy — with this run's verdict and `why` — wins. Carrying it too would
+      double it on the panel.
+    - Resolved, either previously or by `resolved_ids` this run.
+    - Tier is not panel or priority. Belt to the payload rule's braces: nothing
+      but those two tiers ever belongs in the artifact.
+
+    A carried item keeps its original tier and `notified` — this is restoration,
+    not re-judgement. Omission must never escalate, and neither may age.
+    """
+    resolved_ids = set(resolved_ids)
+    fresh_ids = set(fresh_ids)
+    carried = []
+    for fid, entry in (state.get("seen") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        stored = entry.get("item")
+        if not isinstance(stored, dict):
+            continue
+        if fid in fresh_ids or fid in resolved_ids or entry.get("resolved"):
+            continue
+        if entry.get("tier") not in ("panel", "priority"):
+            continue
+
+        item = dict(stored)
+        # The store's top-level flags win over the copy embedded in the payload:
+        # the orchestrator updates them in place (a banner that fired on a later
+        # run, a resolution), and the embedded copy is a snapshot of the run that
+        # wrote it.
+        item["id"] = fid
+        item["tier"] = entry.get("tier")
+        item["notified"] = bool(entry.get("notified"))
+        item["resolved"] = False
+        # Additive and only ever True, matching classification_failed. The
+        # artifact's `window` describes what this run examined, and a carried
+        # item is by definition older than that — without the flag the window
+        # and the items disagree with no way to tell which is wrong.
+        item["carried_forward"] = True
+        carried.append(item)
+    return carried
+
+
 def build_payload(items, sources, window_from, window_to, now_iso, notified,
-                  day=None, status="ok", filtered=0) -> dict:
+                  day=None, status="ok", filtered=0, carried=0) -> dict:
     return {
         "generated_at": now_iso,
         # Ben's local day, passed in explicitly. now_iso[:10] is UTC and
@@ -137,6 +230,11 @@ def build_payload(items, sources, window_from, window_to, now_iso, notified,
         # panel can say "nothing relevant came in, 14 filtered" rather than
         # letting an aggressive filter pass for a quiet hour.
         "filtered": int(filtered),
+        # How many of `items` came from an earlier run today rather than from
+        # this run's window. Reported for the same reason `filtered` is: the
+        # window no longer bounds the item list, and a reader that assumes it
+        # does would misread a carried item as brand-new activity.
+        "carried": int(carried),
         "items": items,
     }
 
@@ -150,9 +248,12 @@ def failure_payload(reason: str, now_iso: str, day=None) -> dict:
         "window": None,
         "sources": {},
         "notified_this_run": False,
-        # Nothing was classified, so nothing was filtered. Present rather than
-        # absent so consumers never have to distinguish "zero" from "no key".
+        # Nothing was classified, so nothing was filtered, and nothing was
+        # carried — a failed run does not get to speak for earlier ones. Present
+        # rather than absent so consumers never have to distinguish "zero" from
+        # "no key".
         "filtered": 0,
+        "carried": 0,
         "items": [],
     }
 

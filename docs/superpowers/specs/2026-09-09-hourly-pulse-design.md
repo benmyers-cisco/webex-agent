@@ -228,6 +228,32 @@ delivered. It gives a clean division of labor:
 So an unanswered ask from yesterday does not reappear in the pulse. It surfaces in the next 08:30
 briefing under "Blocked on you," which already has the lookback and the carry-forward logic.
 
+### Within-day carry-forward — added 2026-09-15
+
+Across days, the division above holds. *Within* a day it originally did not, and that was a bug
+rather than a design: `pulse.json` is rebuilt every run from that run's candidates alone, so an item
+was visible for exactly one hour and then gone — whether or not Ben looked in that hour, whether or
+not a banner fired, whether or not anyone had dealt with it. On 2026-09-15 two DMs from Aanjan Ravi
+were collected at 13:15, correctly panelled, and absent from the artifact by 14:15. The seen store
+had been tracking a `resolved` flag for them the whole time and nothing ever read it.
+
+So: **the panel shows everything from 08:30 today that is still outstanding**, not just the last
+hour. `pulse_output.carry_forward` restores unresolved items from earlier runs beside the new ones,
+and the only thing that takes one off the panel is a real signal —
+`pulse_sources_webex.resolve_answered` asking whether Ben has spoken in that space since. Carried
+items are flagged `carried_forward` and counted in `carried`, because `window` still describes only
+what the current run examined.
+
+Three properties this must keep:
+
+- A carried item keeps its original tier and `notified`. Restoration, not re-judgement: an item that
+  could wait at 13:15 has not become urgent by 14:15, and carrying must not launder away an
+  interruption already delivered.
+- A carried priority item whose banner never fired is still eligible for its retry. Before this, the
+  retry promise expired with the window.
+- Resolution degrades toward visible. A failed reply-check leaves the item on the panel; a stale
+  panel row costs a glance, and one hidden by accident is invisible.
+
 ---
 
 ## Architecture
@@ -318,6 +344,8 @@ the reason is worth a comment in the code.
     "calendar": "ok"
   },
   "notified_this_run": true,
+  "filtered": 0,
+  "carried": 1,
   "items": [
     {
       "id": "sha1-fingerprint",
@@ -325,6 +353,7 @@ the reason is worth a comment in the code.
       "source": "webex",
       "trigger": "watchlist",
       "channel": "C3 + CUI",
+      "space_id": "Y2lzY29zcGFyazovL3VzL1JPT00v…",
       "from": { "name": "Rob Scott", "email": "rorscott@cisco.com" },
       "at": "2026-09-09T14:02:11Z",
       "text": "full verbatim message body",
@@ -341,6 +370,11 @@ the reason is worth a comment in the code.
 
 Items carry the **full verbatim `text`**, not a model-written summary, because the panel shows the
 actual messages. `sources` is not decoration — a degraded email fetch has to be visible.
+
+Three fields exist so that nothing the engine removed or held over can pass for a quiet hour:
+`filtered` counts what the relevance filter dropped, `carried` counts how many of `items` predate
+this run's `window`, and `carried_forward: true` appears on those items (additive and only ever true,
+like `classification_failed`). `space_id` is what lets a later run ask whether Ben has since replied.
 
 ---
 
@@ -472,3 +506,4 @@ All cycle-1 blocking questions were resolved on 2026-09-09. What remains:
 | 2026-09-09 | Matt Caulfield on the watchlist. Matt Miller not. | Ben |
 | 2026-09-09 | Panel is read-only in cycle 1; replying moves to cycle 2 | Nigel recommended, Ben approved |
 | 2026-09-09 | Slack notification emails: panel-only, never priority | Nigel, Ben deferred the call |
+| 2026-09-15 | **Within-day carry-forward.** The artifact is a view of the whole day, not of the last hour: unresolved items from earlier runs are restored beside the new ones, and only Ben having replied takes one off the panel. "Items clear daily" is unchanged — the day boundary is still the reset. | Ben, on the Aanjan Ravi miss |

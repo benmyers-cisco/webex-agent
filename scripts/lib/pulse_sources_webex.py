@@ -155,6 +155,65 @@ def to_candidate(msg, space, tier_hint, prefs, my_email, my_names, watched_threa
     }
 
 
+def resolve_answered(webex, items, my_email) -> set[str]:
+    """Ids of carried Webex items Ben has replied to since they were collected.
+
+    `collect` already drops a message Ben answered, but only within the fetch
+    window: a carried item's message is older than `since`, so nothing ever
+    re-examines it. Without this the carry-forward trades one lie for another —
+    a message Ben answered at 14:31 would sit on the panel until midnight
+    claiming to still need him.
+
+    One fetch per distinct space, from the oldest carried item in it, so the cost
+    is the number of spaces with something outstanding rather than the number of
+    items. `answered_through` is computed over the whole batch for the same
+    reason it is in `collect`: Ben's reply can sit anywhere in it.
+
+    Strictly-earlier, matching `collect`. Equal timestamps are no evidence his
+    reply came second.
+
+    Degrades to "not resolved" on any failure, per-space, and says so on stderr.
+    A stale panel item costs Ben a glance; hiding one he never answered makes it
+    invisible, and that is the error this whole module is built against.
+    """
+    by_space: dict[str, list[tuple[str, datetime]]] = {}
+    for item in items:
+        if item.get("source") != "webex":
+            continue
+        space_id = item.get("space_id")
+        if not space_id:
+            # Pre-`space_id` artifacts, and email items that got this far. There
+            # is nothing to ask Webex about, so the item simply stays visible.
+            continue
+        at = created_at({"created": item.get("at") or ""})
+        if at is None or at.tzinfo is None:
+            # A naive timestamp cannot be compared against Webex's aware ones,
+            # and guessing a zone for it could resolve an item Ben never answered.
+            continue
+        by_space.setdefault(space_id, []).append((item["id"], at))
+
+    resolved: set[str] = set()
+    for space_id, entries in by_space.items():
+        oldest = min(at for _, at in entries)
+        try:
+            messages = webex.get_messages(
+                space_id, after=oldest, max_results=_MESSAGES_PER_SPACE
+            )
+        except Exception as exc:  # noqa: BLE001 — see the docstring
+            print(
+                f"WARNING: pulse could not check whether Ben answered in space "
+                f"{space_id}: {exc}; its carried item(s) stay on the panel",
+                file=sys.stderr,
+            )
+            continue
+        answered_through = my_last_message_at(messages, my_email)
+        if answered_through is None:
+            continue
+        resolved.update(fid for fid, at in entries if at < answered_through)
+
+    return resolved
+
+
 def collect(
     webex, prefs, since, my_email, my_names, watched_space_threads
 ) -> tuple[list[dict], str]:

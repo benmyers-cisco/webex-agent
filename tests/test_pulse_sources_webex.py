@@ -1,7 +1,13 @@
 from datetime import datetime, timezone
 
 from lib.pulse_prefs import parse_prefs
-from lib.pulse_sources_webex import collect, mentions_ben, space_is_eligible, to_candidate
+from lib.pulse_sources_webex import (
+    collect,
+    mentions_ben,
+    resolve_answered,
+    space_is_eligible,
+    to_candidate,
+)
 
 PREFS = parse_prefs("""
 ## Watchlist
@@ -581,3 +587,142 @@ def test_an_equal_timestamp_keeps_the_message_visible():
     webex = FakeWebexClient(spaces, messages)
     out, _status = collect(webex, PREFS, SINCE, MY_EMAIL, MY_NAMES, {})
     assert [c["text"] for c in out] == ["same second"]
+
+
+# --- resolve_answered() — the carried-item counterpart to collect()'s
+# answered_through, which only ever sees messages inside the fetch window ---
+
+
+class RecordingWebexClient(FakeWebexClient):
+    """FakeWebexClient that remembers what was asked of it.
+
+    resolve_answered's cost claim is "one fetch per space, from the oldest
+    carried item in it". That is only checkable if the calls are observable.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.calls = []
+
+    def get_messages(self, room_id, before=None, after=None, max_results=100):
+        self.calls.append({"room_id": room_id, "after": after})
+        return super().get_messages(room_id, before=before, after=after, max_results=max_results)
+
+
+def _carried(item_id, space_id, at, source="webex"):
+    return {"id": item_id, "source": source, "space_id": space_id, "at": at.isoformat()}
+
+
+AT_1251 = datetime(2026, 9, 15, 16, 51, 19, tzinfo=timezone.utc)
+
+
+def _from_me(at):
+    return {
+        "personEmail": MY_EMAIL,
+        "personDisplayName": "Ben Myers",
+        "created": at.isoformat().replace("+00:00", "Z"),
+        "text": "on it",
+    }
+
+
+def test_a_carried_item_ben_replied_to_afterwards_is_resolved():
+    webex = RecordingWebexClient(
+        [], {"dm": [_from_me(datetime(2026, 9, 15, 18, 31, 17, tzinfo=timezone.utc))]}
+    )
+    resolved = resolve_answered(webex, [_carried("aanjan", "dm", AT_1251)], MY_EMAIL)
+    assert resolved == {"aanjan"}
+
+
+def test_a_carried_item_with_no_reply_from_ben_stays_unresolved():
+    webex = RecordingWebexClient([], {"dm": [_msg("aaravi@cisco.com", "any update?", 10)]})
+    assert resolve_answered(webex, [_carried("aanjan", "dm", AT_1251)], MY_EMAIL) == set()
+
+
+def test_a_reply_ben_sent_before_the_item_does_not_resolve_it():
+    """His 09:00 message is no answer to a 12:51 question."""
+    webex = RecordingWebexClient(
+        [], {"dm": [_from_me(datetime(2026, 9, 15, 13, 0, 0, tzinfo=timezone.utc))]}
+    )
+    assert resolve_answered(webex, [_carried("aanjan", "dm", AT_1251)], MY_EMAIL) == set()
+
+
+def test_an_identical_timestamp_does_not_resolve_the_item():
+    """Strictly-earlier, matching collect(). Equal timestamps are no evidence
+    Ben's reply came second, and the safe reading keeps the item visible."""
+    webex = RecordingWebexClient([], {"dm": [_from_me(AT_1251)]})
+    assert resolve_answered(webex, [_carried("aanjan", "dm", AT_1251)], MY_EMAIL) == set()
+
+
+def test_one_fetch_per_space_starting_from_the_oldest_carried_item():
+    older = datetime(2026, 9, 15, 14, 0, 0, tzinfo=timezone.utc)
+    webex = RecordingWebexClient([], {"dm": [], "p1": []})
+    resolve_answered(
+        webex,
+        [
+            _carried("a", "dm", AT_1251),
+            _carried("b", "dm", older),
+            _carried("c", "p1", AT_1251),
+        ],
+        MY_EMAIL,
+    )
+    assert len(webex.calls) == 2
+    by_room = {c["room_id"]: c["after"] for c in webex.calls}
+    assert by_room["dm"] == older
+    assert by_room["p1"] == AT_1251
+
+
+def test_only_the_items_older_than_the_reply_are_resolved():
+    late = datetime(2026, 9, 15, 19, 0, 0, tzinfo=timezone.utc)
+    webex = RecordingWebexClient(
+        [], {"dm": [_from_me(datetime(2026, 9, 15, 18, 31, 17, tzinfo=timezone.utc))]}
+    )
+    resolved = resolve_answered(
+        webex, [_carried("early", "dm", AT_1251), _carried("later", "dm", late)], MY_EMAIL
+    )
+    assert resolved == {"early"}
+
+
+def test_a_failed_fetch_leaves_the_item_on_the_panel():
+    """Degrade toward visible. A stale panel item costs a glance; a resolved-by-
+    accident one is invisible, which is the failure this module exists against."""
+    webex = RecordingWebexClient([], {}, broken_rooms={"dm"})
+    assert resolve_answered(webex, [_carried("aanjan", "dm", AT_1251)], MY_EMAIL) == set()
+
+
+def test_one_broken_space_does_not_stop_another_from_resolving():
+    webex = RecordingWebexClient(
+        [],
+        {"ok-space": [_from_me(datetime(2026, 9, 15, 18, 31, 17, tzinfo=timezone.utc))]},
+        broken_rooms={"dm"},
+    )
+    resolved = resolve_answered(
+        webex, [_carried("a", "dm", AT_1251), _carried("b", "ok-space", AT_1251)], MY_EMAIL
+    )
+    assert resolved == {"b"}
+
+
+def test_non_webex_items_are_never_fetched_for():
+    """Email has no reply signal available here, so asking Webex about it would
+    be a call that cannot answer the question."""
+    webex = RecordingWebexClient([], {})
+    assert resolve_answered(webex, [_carried("e", None, AT_1251, source="email")], MY_EMAIL) == set()
+    assert webex.calls == []
+
+
+def test_a_webex_item_with_no_space_id_is_skipped_rather_than_guessed_at():
+    webex = RecordingWebexClient([], {})
+    assert resolve_answered(webex, [_carried("old", None, AT_1251)], MY_EMAIL) == set()
+    assert webex.calls == []
+
+
+def test_an_unparseable_timestamp_is_skipped_rather_than_resolved():
+    webex = RecordingWebexClient([], {"dm": []})
+    item = {"id": "x", "source": "webex", "space_id": "dm", "at": "not a timestamp"}
+    assert resolve_answered(webex, [item], MY_EMAIL) == set()
+    assert webex.calls == []
+
+
+def test_nothing_carried_means_nothing_asked():
+    webex = RecordingWebexClient([], {})
+    assert resolve_answered(webex, [], MY_EMAIL) == set()
+    assert webex.calls == []
