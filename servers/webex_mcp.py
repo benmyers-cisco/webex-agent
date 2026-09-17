@@ -7,11 +7,28 @@ import logging
 import re
 
 # Add parent directory so we can import webex_client
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_DIR)
 
 from datetime import datetime, timezone, timedelta
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from webex_client import WebexClient
+
+# The Webex OAuth credentials live in .env, which is gitignored. They must NOT go in .mcp.json:
+# that file is tracked and this repo is public. Every other entry point in this project already
+# loads .env exactly like this (cli.py, daily_summary.py, github_triage.py); this server was the
+# one that didn't, which is why .mcp.json grew an `env` block holding the literal secret.
+#
+# Placeholders are dropped BEFORE loading, because load_dotenv does not override a name that is
+# already set. `${WEBEX_CLIENT_ID}` left unexpanded is a non-empty string, so it reads as a real
+# credential, beats .env, and then fails at the Webex API as a 401 — an auth error for what is
+# actually a config error. Same shape as the empty AWS_BEARER_TOKEN_BEDROCK trap documented in
+# scripts/lib/wait_for_network.sh.
+for _placeholder_var in ("WEBEX_CLIENT_ID", "WEBEX_CLIENT_SECRET", "WEBEX_ACCESS_TOKEN"):
+    if os.environ.get(_placeholder_var, "").startswith("${"):
+        del os.environ[_placeholder_var]
+load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 
 mcp = FastMCP("webex")
 logger = logging.getLogger(__name__)

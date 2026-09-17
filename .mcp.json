@@ -2,11 +2,7 @@
   "mcpServers": {
     "webex": {
       "command": "${CLAUDE_PLUGIN_ROOT}/.venv/bin/python3.12",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/servers/webex_mcp.py"],
-      "env": {
-        "WEBEX_CLIENT_ID": "${WEBEX_CLIENT_ID}",
-        "WEBEX_CLIENT_SECRET": "${WEBEX_CLIENT_SECRET}"
-      }
+      "args": ["${CLAUDE_PLUGIN_ROOT}/servers/webex_mcp.py"]
     }
   }
 }
