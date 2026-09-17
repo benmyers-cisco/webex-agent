@@ -212,9 +212,12 @@ def get_webex_client() -> WebexClient:
 def get_claude_client() -> anthropic.Anthropic:
     """Create Claude client — supports both direct API and Bedrock."""
     if os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "true":
-        return anthropic.AnthropicBedrock(
-            aws_profile=os.environ.get("AWS_PROFILE", "default"),
-        )
+        # Empty AWS_BEARER_TOKEN_BEDROCK triggers broken bearer auth;
+        # empty AWS_DEFAULT_PROFILE triggers ProfileNotFound. Clean both.
+        for var in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_DEFAULT_PROFILE"):
+            if os.environ.get(var) == "":
+                del os.environ[var]
+        return anthropic.AnthropicBedrock()
     return anthropic.Anthropic()
 
 
