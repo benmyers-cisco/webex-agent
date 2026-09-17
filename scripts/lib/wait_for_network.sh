@@ -23,6 +23,19 @@
 #   2. A DarkWake fire is early, not doomed — the network usually returns when the machine
 #      properly wakes. So wait for it instead of failing instantly.
 #
+# AND THE LIMIT OF THOSE LESSONS, learned 2026-09-17
+# --------------------------------------------------
+# "Wait for it" only works if the machine wakes inside the window. That day it did not:
+#
+#   09-17 02:00-09:07  DarkWake / Deep Idle, no DNS the whole time
+#   09-17 09:07:53     DarkWake to FullWake, due to HID Activity   <- Ben sat down
+#
+# All three morning jobs burned their full 30 minutes in the dark (06:35, 06:45, 07:20) and gave
+# up 67 minutes before the network came back. No value of NETWORK_WAIT_MAX_SECS fixes that,
+# because StartCalendarInterval never re-fires a failed occurrence — so the fix cannot live in
+# this file. It lives in run_morning_coffee.sh's --catchup mode, which re-checks every 15 minutes
+# until 10:45. Callers of this gate should assume a hard failure here may just mean "not yet".
+#
 # HOW TO USE
 #   . "$SCRIPT_DIR/lib/wait_for_network.sh"
 #   hold_system_awake                       # optional but recommended before waiting
@@ -53,6 +66,11 @@ NETWORK_WAIT_WAITED=0
 # stretches past the wall-clock cap without ever getting a live network to test. `-s` holds
 # system sleep (effective on AC, which this Mac is), `-i` holds idle sleep, and `-w $$`
 # makes caffeinate exit on its own when we do, so there is nothing to clean up.
+#
+# What it does NOT do — and 2026-09-17 is the proof — is promote a DarkWake into a FullWake. It
+# holds whatever wake state we are already in, so from a dark fire it faithfully holds us in the
+# dark, with no DNS, for the entire retry window. `caffeinate -u` (a user assertion) or a
+# `sudo pmset repeat wakeorpoweron` schedule are the levers that produce a real wake.
 hold_system_awake() {
   if command -v caffeinate >/dev/null 2>&1; then
     caffeinate -si -w $$ &
@@ -143,6 +161,51 @@ wait_for_network() {
   done
 }
 
+# Capture, at the moment of failure, the three facts that separate the two explanations curl
+# cannot tell apart. Added 2026-09-17 because after that morning there was no way to settle
+# whether the Mac's network stack was never up (DarkWake) or the house simply had no internet —
+# every probe returns the same 000 either way, and both stories fit the evidence equally well.
+#
+#   no IP / gateway unreachable        -> this Mac's network was not up. DarkWake, dock asleep,
+#                                         Wi-Fi not associated.
+#   gateway up, resolver unreachable   -> the LAN is fine and the upstream is not. ISP or router.
+#   resolver answers, hosts still down -> transit or a real service outage. Not this machine.
+#
+# Everything here is bounded to ~2s per probe and runs only on the failure path, so it costs
+# nothing on a normal morning.
+net_diagnose() {
+  local iface gw ip res gw_ok="no" res_ok="no" resolved=""
+
+  iface="$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')"
+  gw="$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')"
+  res="$(scutil --dns 2>/dev/null | awk '/nameserver\[0\]/{print $3; exit}')"
+  [ -n "$iface" ] && ip="$(ipconfig getifaddr "$iface" 2>/dev/null)" || ip=""
+
+  [ -n "$gw" ] && ping -c1 -t2 "$gw" >/dev/null 2>&1 && gw_ok="yes"
+  [ -n "$res" ] && nc -z -G2 -w2 "$res" 53 >/dev/null 2>&1 && res_ok="yes"
+  [ -n "$res" ] && resolved="$(dig +short +time=2 +tries=1 "@$res" apple.com 2>/dev/null | head -1)"
+
+  # The verdict, stated plainly, because the point of this block is to stop the next person
+  # guessing — including the next me.
+  local verdict
+  if [ -z "$ip" ] || [ "$gw_ok" = no ]; then
+    verdict="**this Mac had no working network at all** — no route off the machine. DarkWake, a \
+sleeping dock, or Wi-Fi not associated. Not the internet."
+  elif [ "$res_ok" = no ]; then
+    verdict="**the LAN was up and the upstream was not** — the gateway answered and the resolver \
+did not. That is an ISP or router outage, and nothing on this Mac would have fixed it."
+  elif [ -z "$resolved" ]; then
+    verdict="**DNS was reachable but not answering** — resolver accepted TCP/53 and returned no \
+record. Umbrella-side or a captive portal."
+  else
+    verdict="**name resolution worked and the hosts still did not** — transit or a genuine \
+service outage upstream. Nothing to fix here."
+  fi
+
+  printf 'At the moment it gave up: interface `%s`, address `%s`, gateway `%s` (%s), resolver `%s` (tcp/53 %s, resolved apple.com to `%s`).\n\nDiagnosis: %s\n' \
+    "${iface:-none}" "${ip:-none}" "${gw:-none}" "$gw_ok" "${res:-none}" "$res_ok" "${resolved:-nothing}" "$verdict"
+}
+
 # The failure text every caller should use, so the diagnosis stays consistent and — this is
 # the point — never blames a credential for a network outage.
 network_failure_message() {
@@ -157,8 +220,9 @@ network_failure_message() {
   printf '%s' "The network was unreachable for the whole retry window — \
 $window, checked every $interval. Still unreachable:\`${NETWORK_WAIT_DOWN# }\`.
 
-**Nothing is wrong with your credentials.** The usual cause is that launchd fired this job
-during a **DarkWake** — the Mac comes up far enough to run scheduled work but has no
-working DNS — and it never fully woke inside the window. Re-run it by hand now that the
-machine is awake, or let \`/morning-coffee\` re-run it for you."
+**Nothing is wrong with your credentials.** Two things look identical from here — the Mac never
+came properly awake (launchd fires jobs during **DarkWake**, which may not have working DNS), or
+there was simply no internet. So rather than guess:
+
+$(net_diagnose)"
 }
