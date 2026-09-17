@@ -168,11 +168,33 @@ wait_for_network() {
 #
 #   no IP / gateway unreachable        -> this Mac's network was not up. DarkWake, dock asleep,
 #                                         Wi-Fi not associated.
-#   gateway up, resolver unreachable   -> the LAN is fine and the upstream is not. ISP or router.
+#   gateway up, resolver unreachable   -> the LAN is fine and name resolution is not. On THIS Mac
+#                                         that is more likely Cisco Secure Client than the ISP —
+#                                         see net_secure_client_state below.
 #   resolver answers, hosts still down -> transit or a real service outage. Not this machine.
 #
 # Everything here is bounded to ~2s per probe and runs only on the failure path, so it costs
 # nothing on a normal morning.
+
+# The 2026-09-17 outage turned out to be a **VPN/Secure Client problem on the laptop**, which is
+# a case the gateway/resolver split above gets actively WRONG: it would have reported "the LAN is
+# up and the upstream is not — ISP or router," sending Ben to reboot a router that was fine.
+#
+# The reason is that on this Mac the resolver IS the corporate stack. Nameservers are Cisco
+# Umbrella (208.67.222.222/220.220) because `acumbrellaagent` puts them there, and `csc_swgagent`
+# and `csc_zta_agent` carry web and zero-trust access. There is usually no `utun` at all — this is
+# not a classic AnyConnect tunnel — so "is a tunnel up?" is the wrong question. The right one is
+# whether those agents are alive, because when they are not, name resolution dies while the LAN
+# stays perfectly healthy. Identical symptom, completely different fix.
+net_secure_client_state() {
+  local agents="" p utun
+  for p in acumbrellaagent csc_swgagent csc_zta_agent vpnagentd; do
+    pgrep -f "$p" >/dev/null 2>&1 && agents="$agents $p"
+  done
+  utun="$(ifconfig 2>/dev/null | awk '/^utun/{i=$1} /inet /{if(i!=""){print i; i=""}}' | paste -sd, - )"
+  printf 'Secure Client agents running:%s. Tunnel interfaces: %s.' \
+    "${agents:- NONE}" "${utun:-none (normal here — Umbrella/ZTA, not a tunnel)}"
+}
 net_diagnose() {
   local iface gw ip res gw_ok="no" res_ok="no" resolved=""
 
@@ -192,18 +214,20 @@ net_diagnose() {
     verdict="**this Mac had no working network at all** — no route off the machine. DarkWake, a \
 sleeping dock, or Wi-Fi not associated. Not the internet."
   elif [ "$res_ok" = no ]; then
-    verdict="**the LAN was up and the upstream was not** — the gateway answered and the resolver \
-did not. That is an ISP or router outage, and nothing on this Mac would have fixed it."
+    verdict="**the LAN was up and name resolution was not** — the gateway answered and the \
+resolver did not. On this Mac the resolver is Cisco's own stack, so **check Secure Client before \
+the ISP**; 2026-09-17 was exactly this and it was a VPN fault, not the internet."
   elif [ -z "$resolved" ]; then
     verdict="**DNS was reachable but not answering** — resolver accepted TCP/53 and returned no \
-record. Umbrella-side or a captive portal."
+record. Umbrella-side, a captive portal, or a half-connected Secure Client."
   else
     verdict="**name resolution worked and the hosts still did not** — transit or a genuine \
 service outage upstream. Nothing to fix here."
   fi
 
-  printf 'At the moment it gave up: interface `%s`, address `%s`, gateway `%s` (%s), resolver `%s` (tcp/53 %s, resolved apple.com to `%s`).\n\nDiagnosis: %s\n' \
-    "${iface:-none}" "${ip:-none}" "${gw:-none}" "$gw_ok" "${res:-none}" "$res_ok" "${resolved:-nothing}" "$verdict"
+  printf 'At the moment it gave up: interface `%s`, address `%s`, gateway `%s` (%s), resolver `%s` (tcp/53 %s, resolved apple.com to `%s`). %s\n\nDiagnosis: %s\n' \
+    "${iface:-none}" "${ip:-none}" "${gw:-none}" "$gw_ok" "${res:-none}" "$res_ok" \
+    "${resolved:-nothing}" "$(net_secure_client_state)" "$verdict"
 }
 
 # The failure text every caller should use, so the diagnosis stays consistent and — this is
