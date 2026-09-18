@@ -20,9 +20,14 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 
-# Mirrors GITHUB_ORG / MAIN_REPO in github_triage.py — used only for the access probe below.
-GITHUB_ORG="oort-dev"
-MAIN_REPO="centenario"
+# Mirrors MAIN_OWNER / MAIN_REPO / SEARCH_ORG in github_triage.py — used only for the access
+# probe below. The main board was renamed and moved: oort-dev/centenario -> cisco-sbg/ID-fabric-core.
+MAIN_OWNER="cisco-sbg"
+MAIN_REPO="ID-fabric-core"
+SEARCH_ORG="cisco-sbg"
+# docs-gitbook did NOT move with the main board — it is still in oort-dev, so the token needs
+# a grant on BOTH orgs and the failure text has to name both.
+DOCS_OWNER="oort-dev"
 OUTPUT_DIR="$PROJECT_DIR/output"
 
 # Which of the two daily runs this is. Mirrors SLOT / FILE_SUFFIX / DEFAULT_LOOKBACK in
@@ -56,7 +61,7 @@ write_failure() {
   {
     printf '# GitHub Triage (%s) — %s\n\n' "$SLOT" "$(date '+%Y-%m-%d %I:%M %p')"
     printf 'Source: `%s` org | Lookback: %s days\n\n---\n\n' \
-      "$GITHUB_ORG" "${GITHUB_LOOKBACK_DAYS:-$DEFAULT_LOOKBACK}"
+      "$SEARCH_ORG" "${GITHUB_LOOKBACK_DAYS:-$DEFAULT_LOOKBACK}"
     printf '## ⚠️ Triage did not run — %s\n\n' "$headline"
     printf '%s\n' "$1"
     printf '\nNo GitHub data was fetched. **Do not read this as a quiet day.**\n'
@@ -245,16 +250,15 @@ fi
 # /user, and then 404d on every single oort-dev repo. Probe the actual targets instead of
 # trusting the handshake.
 #
-# Both repos are probed because they are in DIFFERENT ORGS — oort-dev and cisco-sbg carry
-# independent SAML/SSO grants, so one can lapse while the other keeps working. A probe that
-# only checked centenario would pass cleanly while every ID-fabric discussion silently
-# vanished from the briefing.
+# Both repos are probed rather than one, because per-repo access can differ even inside one
+# org — a probe that only checked the main board would pass cleanly while every ID-fabric
+# discussion silently vanished from the briefing.
 #
 # Policy on a partial failure: proceed if ANY source is readable, and let github_triage.py
 # stamp the file with its ⚠️ FAILED banner for the source that broke. Aborting the whole run
 # would throw away the readable repo's data to report the unreadable one, and the python
 # layer already records per-call failures loudly. Only a total loss exits 77.
-PROBE_TARGETS="$GITHUB_ORG/$MAIN_REPO cisco-sbg/ID-fabric"
+PROBE_TARGETS="$MAIN_OWNER/$MAIN_REPO cisco-sbg/ID-fabric"
 READABLE=0
 UNREADABLE=""
 for TARGET in $PROBE_TARGETS; do
@@ -275,8 +279,8 @@ if [ "$READABLE" -eq 0 ]; then
 
 A private repo reads as 404, not 403, to a caller that cannot see it. The network passed its
 reachability check and \`/user\` answered, so this is authorisation: most likely the SAML/SSO
-grants have lapsed on this token. Re-run \`gh auth login\` and re-authorise both
-\`$GITHUB_ORG\` and \`cisco-sbg\`." "the token is valid but not authorised for either org"
+grants have lapsed on this token. Re-run \`gh auth login\` and re-authorise
+\`$SEARCH_ORG\` and \`$DOCS_OWNER\`." "the token is valid but not authorised for either org"
   exit 77 # EX_NOPERM
 fi
 
@@ -284,6 +288,29 @@ if [ -n "$UNREADABLE" ]; then
   log "proceeding with a PARTIAL run — unreadable:$UNREADABLE"
 fi
 log "gh authenticated as $WHOAMI, $READABLE/2 source repos readable"
+
+# A SECOND probe, against the search API, because the REST probe above cannot catch a rename.
+# On 2026-09-18 the main board had already become cisco-sbg/ID-fabric-core and every one of
+# these three checks still passed on the OLD name:
+#
+#   gh api repos/oort-dev/centenario                   -> 200 (REST follows the redirect)
+#   gh api graphql repository(owner:"oort-dev"...)     -> 224 discussions (so does GraphQL)
+#   gh search issues --repo=oort-dev/centenario        -> ERROR (search resolves names literally)
+#
+# So the wrapper reported a clean bill of health while every label/mention search failed and
+# every org-scoped search returned an empty list with no error. Resolving is not the same as
+# being searchable, in exactly the way that authenticating was not the same as being
+# authorised. Probe each API the job actually uses.
+#
+# Non-fatal by the same partial-run policy as above: the discussions half of the briefing
+# still works when search is broken, and dropping it to report the other half is a worse
+# trade. But it must be LOUD, because the failure it catches is otherwise silent.
+if ! gh search issues --repo="$MAIN_OWNER/$MAIN_REPO" --state=open --limit 1 \
+     --json number >/dev/null 2>&1; then
+  log "WARNING: the search API cannot resolve $MAIN_OWNER/$MAIN_REPO — issues, labels, and"
+  log "         mentions will be empty even though the REST probe above passed. Most likely"
+  log "         the repo was renamed or moved again; search does not follow a rename redirect."
+fi
 log "starting $SLOT triage (lookback ${GITHUB_LOOKBACK_DAYS:-$DEFAULT_LOOKBACK} days, writing *$FILE_SUFFIX)"
 
 "$PROJECT_DIR/.venv/bin/python3" "$SCRIPT_DIR/github_triage.py"

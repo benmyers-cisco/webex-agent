@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GitHub triage — fetches discussions, issues, and mentions from oort-dev, scores relevance, outputs triage markdown."""
+"""GitHub triage — fetches discussions, issues, and mentions from cisco-sbg, scores relevance, outputs triage markdown."""
 
 import json
 import os
@@ -16,12 +16,36 @@ import anthropic
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output")
 GITHUB_USER = "benmyers-cisco"
-GITHUB_ORG = "oort-dev"
-MAIN_REPO = "centenario"
 
-# Discussions are pulled from both repos. cisco-sbg/ID-fabric is a DIFFERENT ORG, so it is
-# not reachable by anything scoped to GITHUB_ORG — issues and mentions below are still
-# oort-dev-only and would not pick this up.
+# The main board was renamed AND moved orgs: `oort-dev/centenario` is now
+# `cisco-sbg/ID-fabric-core`. The three GitHub APIs disagree about whether the old name
+# still works, which is why this broke in two different ways at once:
+#
+#   REST     follows the rename redirect  -> still worked, including the wrapper's health probe
+#   GraphQL  follows the rename redirect  -> still worked, so discussions kept arriving
+#   Search   does NOT follow it           -> broke
+#
+# So `gh search issues --repo=oort-dev/centenario` failed loudly ("the listed users and
+# repositories cannot be searched"), while anything scoped to `org:oort-dev` returned an
+# empty list with no error at all — the repo simply is not in that org anymore. The silent
+# half is the dangerous one: it made "assigned to Ben" and "mentions Ben" read as a quiet
+# week. Never infer from a working REST call that a search will resolve the same name.
+MAIN_OWNER = "cisco-sbg"
+MAIN_REPO = "ID-fabric-core"
+
+# Org for the account-wide searches (assigned-to-Ben, mentions-anywhere). One org still
+# covers both boards now that the main one moved — and it reaches ID-fabric as a bonus,
+# which `org:oort-dev` never could.
+SEARCH_ORG = "cisco-sbg"
+
+# docs-gitbook did NOT move; it is still in oort-dev. It keeps its own constants rather than
+# riding on a shared org name that would silently retarget it to a repo that does not exist.
+DOCS_OWNER = "oort-dev"
+DOCS_REPO = "docs-gitbook"
+
+# Discussions are pulled from both boards. They are now in the same org, so the issue and
+# mention searches below reach both — before the move they were oort-dev-only and could not
+# see ID-fabric at all.
 #
 # `bonus` is a per-source relevance floor, and it exists for the same reason labels score:
 # the container is itself a topic declaration. Every discussion in ID-fabric is about
@@ -29,7 +53,7 @@ MAIN_REPO = "centenario"
 # "SessionState Storage and Lifecycle" — no keyword in RELEVANT_KEYWORDS appears, so without
 # a floor the most relevant repo on the board would score near zero and be filtered out.
 DISCUSSION_SOURCES = [
-    {"owner": "oort-dev", "repo": "centenario", "bonus": 0},
+    {"owner": MAIN_OWNER, "repo": MAIN_REPO, "bonus": 0},
     {"owner": "cisco-sbg", "repo": "ID-fabric", "bonus": 3},
 ]
 GH_ACCOUNT = "benmyers-cisco"
@@ -181,7 +205,7 @@ def fetch_repo_discussions(owner: str, repo: str, since_days: int = LOOKBACK_DAY
     walk, and PAGE_CAP is only a runaway guard.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    PAGE_CAP = 5  # 5 × 50 = 250, more than centenario's 221 or ID-fabric's 34 currently hold
+    PAGE_CAP = 5  # 5 × 50 = 250, more than ID-fabric-core's 224 or ID-fabric's 34 currently hold
     kept: list[dict] = []
     after = "null"
 
@@ -277,7 +301,7 @@ def fetch_relevant_issues(since_days: int = LOOKBACK_DAYS) -> list[dict]:
     # Security App") and would not survive as a bare qualifier.
     for label in RELEVANT_LABELS:
         collect([
-            f"--repo={GITHUB_ORG}/{MAIN_REPO}",
+            f"--repo={MAIN_OWNER}/{MAIN_REPO}",
             f"--label={label}",
             "--state=open",
             f"--updated=>={cutoff}",
@@ -289,7 +313,7 @@ def fetch_relevant_issues(since_days: int = LOOKBACK_DAYS) -> list[dict]:
     # as "needs your attention". Bounded now: an assigned issue surfaces when it MOVES.
     collect([
         f"--assignee={GITHUB_USER}",
-        f"--owner={GITHUB_ORG}",
+        f"--owner={SEARCH_ORG}",
         "--state=open",
         f"--updated=>={cutoff}",
         "--limit", "15",
@@ -302,7 +326,7 @@ def fetch_relevant_issues(since_days: int = LOOKBACK_DAYS) -> list[dict]:
     # label change moves an ancient issue's updatedAt into the window, and the briefing then
     # asked Ben to act on work that was already finished or explicitly not planned.
     collect([
-        f"--repo={GITHUB_ORG}/{MAIN_REPO}",
+        f"--repo={MAIN_OWNER}/{MAIN_REPO}",
         f"--mentions={GITHUB_USER}",
         "--state=open",
         f"--updated=>={cutoff}",
@@ -326,12 +350,12 @@ def fetch_relevant_issues(since_days: int = LOOKBACK_DAYS) -> list[dict]:
 
 
 def fetch_mentions_and_notifications() -> list[dict]:
-    """Check for recent @mentions in comments across oort-dev."""
+    """Check for recent @mentions in comments across the org, both boards."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d")
 
     raw = run_gh([
         "search", "issues",
-        f"org:{GITHUB_ORG}",
+        f"org:{SEARCH_ORG}",
         f"mentions:{GITHUB_USER}",
         f"updated:>={cutoff}",
         "--state=open",
@@ -346,7 +370,7 @@ def fetch_mentions_and_notifications() -> list[dict]:
 def fetch_docs_changes(since_days: int = LOOKBACK_DAYS) -> list[dict]:
     """Fetch recent commits to docs-gitbook."""
     raw = run_gh([
-        "api", f"repos/{GITHUB_ORG}/docs-gitbook/commits",
+        "api", f"repos/{DOCS_OWNER}/{DOCS_REPO}/commits",
         "--jq", f'[.[] | select(.commit.author.date > "{(datetime.now(timezone.utc) - timedelta(days=since_days)).strftime("%Y-%m-%dT%H:%M:%SZ")}") | {{sha: .sha, message: .commit.message, date: .commit.author.date, author: .commit.author.name}}]'
     ])
     if raw:
@@ -547,8 +571,8 @@ def build_triage_prompt(discussions: list, issues: list, mentions: list, docs: l
     """Build the prompt for Claude to generate the triage markdown."""
     context = """You are generating a GitHub triage briefing for Ben Myers, a PM at Cisco working on Identity Fabric, CII (Cisco Identity Intelligence), CUI integration, and Meraki+Duo.
 
-Discussions come from TWO repos in two different orgs: `oort-dev/centenario` (the CII/Cloud
-Control product board) and `cisco-sbg/ID-fabric` (the Identity Fabric design board, where
+Discussions come from TWO repos: `cisco-sbg/ID-fabric-core` (the CII/Cloud Control product
+board, formerly `oort-dev/centenario`) and `cisco-sbg/ID-fabric` (the Identity Fabric design board, where
 architecture proposals and RFCs land). Issue numbers collide between them, so always name the
 repo. ID-fabric items are design proposals Ben often needs to weigh in on before they settle,
 so lean toward "Worth Reviewing" for those rather than "Project Updates" — but only promote
@@ -675,7 +699,7 @@ def write_output(body: str, dropped: int | None = None, closed: int | None = Non
     label = "morning sweep" if SLOT == "am" else "afternoon delta"
     header = f"# GitHub Triage ({label}) — {now.strftime('%Y-%m-%d %I:%M %p')}\n\n"
     sources = ", ".join(f"`{s['owner']}/{s['repo']}`" for s in DISCUSSION_SOURCES)
-    header += f"Discussions: {sources} | Issues/mentions: `{GITHUB_ORG}` | Lookback: {LOOKBACK_DAYS} days"
+    header += f"Discussions: {sources} | Issues/mentions: `{SEARCH_ORG}` | Lookback: {LOOKBACK_DAYS} days"
     # State the drop count. A relevance filter that discards quietly is the same failure this
     # script already had twice: an empty section that could mean "nothing happened" or "the
     # threshold ate it" and no way to tell which from the file alone.
@@ -699,7 +723,7 @@ def main() -> int:
     tell a broken run from a quiet one."""
     if log_slot_warning:
         log(f"  warning: {log_slot_warning}")
-    log(f"GitHub Triage [{SLOT}] — fetching data from oort-dev "
+    log(f"GitHub Triage [{SLOT}] — fetching data from {SEARCH_ORG} "
         f"(lookback {LOOKBACK_DAYS}d, writing *{FILE_SUFFIX})...")
 
     log("  Fetching discussions...")
