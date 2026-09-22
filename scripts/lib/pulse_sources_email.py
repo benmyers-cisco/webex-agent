@@ -85,6 +85,36 @@ def _recipients(msg, key) -> set[str]:
     return {_addr(r) for r in (msg.get(key) or [])}
 
 
+GITHUB_DOMAIN = "github.com"
+# Ben is @benmyers-cisco. The word boundary is the whole point: it matches the
+# full handle and a bare "@benmyers", and it does NOT match "@ben-duo" — that is
+# Ben Murray, and treating his mentions as Ben's is the top false positive in
+# GitHub triage. It also will not match "@benmyersfoo", since a boundary needs a
+# non-word character after the handle.
+GITHUB_MENTION = re.compile(r"@benmyers\b", re.I)
+
+
+def _is_github_sender(address: str) -> bool:
+    domain = address.partition("@")[2]
+    return domain == GITHUB_DOMAIN or domain.endswith("." + GITHUB_DOMAIN)
+
+
+def _is_github_mention(sender: str, msg: dict) -> bool:
+    """GitHub relay mail whose visible text names Ben's handle.
+
+    Reads the subject and the body preview, which is all msgraph returns. The
+    preview is truncated to roughly 255 characters, so a mention buried further
+    down a long comment is not visible here and will not be caught. That is a
+    known ceiling, not a bug to work around: the twice-daily github_triage run
+    reads full comment bodies over the GraphQL API and remains the complete
+    sweep. This carve-out exists to shorten the wait on the obvious cases.
+    """
+    if not _is_github_sender(sender):
+        return False
+    text = f"{msg.get('subject') or ''}\n{msg.get('body_preview') or ''}"
+    return bool(GITHUB_MENTION.search(text))
+
+
 def _is_automated(address: str) -> bool:
     if not address:
         return False
@@ -129,6 +159,14 @@ def classify_sender(msg: dict, prefs, my_email: str) -> str:
     # the watchlist or the mail is addressed straight at Ben. Both checks come
     # before those rules for that reason.
     if _is_automated(sender) or is_bulk_sender(sender):
+        # One exception, and only one: GitHub notification mail that names Ben's
+        # handle. Being @-mentioned in a discussion is a person asking Ben a
+        # question; the address it arrives from is an accident of GitHub's relay.
+        # Scoped to the mention rather than the sender, because GitHub's PR
+        # firehose shares the address — on 2026-09-22 seven arrived and one
+        # named him.
+        if _is_github_mention(sender, msg):
+            return "keep"
         return "drop"
 
     # A watchlist sender is priority-eligible regardless of addressing.

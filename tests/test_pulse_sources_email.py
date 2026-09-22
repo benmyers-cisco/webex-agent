@@ -448,3 +448,96 @@ def test_collect_asks_for_unread_mail_only():
     collect("2026-09-09T14:00:00+00:00", PREFS, ME, runner=runner)
     query = captured["args"][2]
     assert query == "received>=2026-09-09 AND isRead:false"
+
+
+# --- The GitHub @-mention carve-out. ---
+#
+# GitHub notification mail is automated, so the rules above drop all of it. That
+# was right for the PR-merge firehose and wrong for the one case that matters:
+# someone asking Ben a question by name in a discussion. On 2026-09-22 Sharif
+# Anani asked "Ben Myers (@benmyers-cisco) is that you?" on ID-fabric #735; the
+# pulse fetched it, dropped it at eligibility, and Ben found out from the 16:00
+# triage six hours later. Seven GitHub notifications arrived that day and exactly
+# one named him — so the carve-out has to be the mention, not the sender.
+#
+# Eligibility only. A mention becomes a candidate; the classifier still decides
+# whether it can wait.
+
+GITHUB = {"name": "Sharif Anani", "address": "notifications@github.com"}
+
+
+def _github_msg(body, subject="Re: [cisco-sbg/ID-fabric] Identity Fabric CA (Discussion #735)"):
+    return _msg({"from": dict(GITHUB), "subject": subject, "body_preview": body})
+
+
+def test_github_notification_naming_ben_clears_eligibility():
+    msg = _github_msg("I'm looking for a specific person to ping about this on the AM "
+                      "side.\r\n\r\nBen Myers (@benmyers-cisco) is that you? or do you know someone?")
+    assert classify_sender(msg, PREFS, ME) == "keep"
+
+
+def test_github_notification_without_a_mention_is_still_dropped():
+    msg = _github_msg("Merged #60910 into master.",
+                      subject="Re: [cisco-sbg/ZT-trustedpath] Add country-code evaluation (PR #60910)")
+    assert classify_sender(msg, PREFS, ME) == "drop"
+
+
+def test_github_mention_of_a_different_ben_is_still_dropped():
+    # @ben-duo is Ben Murray, not Ben Myers. This is the top false positive in
+    # GitHub triage — it must not become one here.
+    msg = _github_msg("@ben-duo can you take a look at this before the cut?")
+    assert classify_sender(msg, PREFS, ME) == "drop"
+
+
+def test_github_mention_matching_is_case_insensitive():
+    msg = _github_msg("cc @BenMyers-Cisco for the AM view")
+    assert classify_sender(msg, PREFS, ME) == "keep"
+
+
+# Deliberately not tested: suppressing a mention because the GitHub From display
+# name is "Ben Myers". Identifying the commenting human on a notifications@github
+# address means matching a display name, and this module's rule is that a display
+# name is never a matching signal because the sender controls it. GitHub also does
+# not notify you about your own comments by default, so the case the suppression
+# would cover is one GitHub rarely produces. A self-mention reaching the panel is
+# a cosmetic cost; display-name matching would be a hole in a stated invariant.
+
+
+def test_a_non_github_automated_sender_naming_ben_is_still_dropped():
+    # The carve-out is scoped to GitHub, not to every bot that can type a handle.
+    msg = _msg({"from": {"name": "Jira", "address": "notifications@atlassian.net"},
+                "body_preview": "@benmyers-cisco was assigned ZTRND-2453"})
+    assert classify_sender(msg, PREFS, ME) == "drop"
+
+
+def test_noreply_github_naming_ben_also_clears_eligibility():
+    # GitHub sends from both notifications@ and noreply@; the carve-out keys on
+    # the domain so it does not depend on which one a given feature uses.
+    msg = _msg({"from": {"name": "Sharif Anani", "address": "noreply@github.com"},
+                "body_preview": "@benmyers-cisco is that you?"})
+    assert classify_sender(msg, PREFS, ME) == "keep"
+
+
+def test_github_mention_candidate_is_priority_eligible_not_panel_only():
+    # tier_hint "email" lets the classifier rate it priority; "slack_panel"
+    # would pin it to the silent section and defeat the whole fix.
+    msg = _github_msg("Ben Myers (@benmyers-cisco) is that you?")
+    disposition = classify_sender(msg, PREFS, ME)
+    assert disposition == "keep"
+    candidate = to_candidate(msg, disposition, PREFS)
+    assert candidate["tier_hint"] == "email"
+    assert candidate["is_direct_mention"] is True
+    assert "@benmyers-cisco" in candidate["text"]
+
+
+def test_collect_keeps_a_github_mention_and_drops_github_noise():
+    mention = _github_msg("Ben Myers (@benmyers-cisco) is that you?")
+    noise = _github_msg("Merged #60910 into master.")
+
+    def runner(args):
+        return json.dumps({"messages": [mention, noise]})
+
+    candidates, status = collect("2026-09-09T14:00:00+00:00", PREFS, ME, runner=runner)
+    assert status == "ok"
+    assert len(candidates) == 1
+    assert candidates[0]["from_name"] == "Sharif Anani"
